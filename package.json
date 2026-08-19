@@ -1,0 +1,18 @@
+{
+  "name": "flyweave",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @flyweave/web",
+    "build": "npm run build -w @flyweave/web",
+    "typecheck": "npm run typecheck -w @flyweave/web",
+    "preview": "npm run preview -w @flyweave/web"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}
