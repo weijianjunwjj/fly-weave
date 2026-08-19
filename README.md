@@ -61,6 +61,16 @@ Agent 需要完成：
 7. 审批通过后调用业务工具创建换货单；
 8. 写回工单并记录完整执行轨迹。
 
+## MVP Contract
+
+Flyweave 使用一套刻意保持轻量的执行契约来约束 AI 辅助开发，避免 MVP 演变成通用平台：
+
+- [`spec.md`](specs/001-service-agent-mvp/spec.md) — 产品事实、Golden Path、功能需求、验收标准与明确非目标
+- [`plan.md`](specs/001-service-agent-mvp/plan.md) — 技术方案、领域模型、Tool 边界、审批与审计设计
+- [`tasks.md`](specs/001-service-agent-mvp/tasks.md) — T001–T030 可执行任务，映射 GitHub Issues #1–#5
+
+原则：**Outcome over chat. Thin vertical slice over platform breadth. Real execution over impressive simulation.**
+
 ## Core Capabilities
 
 - **Agent Workflow** — 将复杂服务流程拆成可观察、可恢复的执行步骤
