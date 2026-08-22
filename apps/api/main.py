@@ -1,10 +1,19 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from config import settings
 
 
 app = FastAPI(title=settings.app_name)
+
+# 允许本地前端开发服务器（Vite 默认端口）跨域访问健康检查等接口
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
 
 
 class HealthResponse(BaseModel):

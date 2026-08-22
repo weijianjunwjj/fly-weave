@@ -1,7 +1,42 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 
 const appName = ref('Flyweave')
+
+type HealthStatus = 'loading' | 'connected' | 'failed'
+
+const healthStatus = ref<HealthStatus>('loading')
+
+const HEALTH_ENDPOINT = 'http://localhost:8000/health'
+
+function isHealthy(data: unknown): boolean {
+  if (typeof data !== 'object' || data === null) {
+    return false
+  }
+  const record = data as Record<string, unknown>
+  return (
+    record.status === 'healthy' &&
+    typeof record.app_name === 'string' &&
+    typeof record.environment === 'string'
+  )
+}
+
+async function checkBackendHealth(): Promise<void> {
+  healthStatus.value = 'loading'
+  try {
+    const response = await fetch(HEALTH_ENDPOINT)
+    if (!response.ok) {
+      healthStatus.value = 'failed'
+      return
+    }
+    const data = await response.json()
+    healthStatus.value = isHealthy(data) ? 'connected' : 'failed'
+  } catch {
+    healthStatus.value = 'failed'
+  }
+}
+
+onMounted(checkBackendHealth)
 </script>
 
 <template>
@@ -10,6 +45,11 @@ const appName = ref('Flyweave')
       <h1>{{ appName }}</h1>
       <p>企业 AI 服务工作流演示</p>
     </header>
+    <section class="health-status" data-testid="backend-health-status" :data-status="healthStatus">
+      <span v-if="healthStatus === 'loading'">正在检查后端连接...</span>
+      <span v-else-if="healthStatus === 'connected'">后端已连接</span>
+      <span v-else>后端连接失败</span>
+    </section>
   </div>
 </template>
 
@@ -38,5 +78,22 @@ const appName = ref('Flyweave')
   margin: 0.5rem 0 0;
   font-size: 1rem;
   opacity: 0.9;
+}
+
+.health-status {
+  padding: 1rem 2rem;
+  font-size: 0.95rem;
+}
+
+.health-status[data-status='connected'] {
+  color: #2e7d32;
+}
+
+.health-status[data-status='failed'] {
+  color: #c62828;
+}
+
+.health-status[data-status='loading'] {
+  color: #616161;
 }
 </style>
