@@ -70,7 +70,7 @@ uvicorn main:app --reload
 
 ```bash
 cd apps/api
-pytest
+../../.venv/Scripts/python.exe -m pytest
 ```
 
 ## 环境配置
@@ -115,25 +115,25 @@ DATABASE_URL=postgresql://flyweave:devpassword@localhost:5432/flyweave_dev
 **生成新迁移**：
 ```bash
 cd apps/api
-.venv/Scripts/python.exe -m alembic revision --autogenerate -m "描述变更"
+../../.venv/Scripts/python.exe -m alembic revision --autogenerate -m "描述变更"
 ```
 
 **应用迁移**：
 ```bash
 cd apps/api
-.venv/Scripts/python.exe -m alembic upgrade head
+../../.venv/Scripts/python.exe -m alembic upgrade head
 ```
 
 **查看迁移历史**：
 ```bash
 cd apps/api
-.venv/Scripts/python.exe -m alembic history
+../../.venv/Scripts/python.exe -m alembic history
 ```
 
 **回滚迁移**：
 ```bash
 cd apps/api
-.venv/Scripts/python.exe -m alembic downgrade -1
+../../.venv/Scripts/python.exe -m alembic downgrade -1
 ```
 
 迁移脚本存储在 `migrations/versions/` 目录，由 Alembic 基于 `database.py` 中的 SQLAlchemy 模型自动生成。
@@ -144,7 +144,7 @@ cd apps/api
 
 ```bash
 cd apps/api
-pytest tests/test_database.py -v
+../../.venv/Scripts/python.exe -m pytest tests/test_database.py -v
 ```
 
 此测试会验证 DATABASE_URL 配置并执行真实的 PostgreSQL 连接检查。测试失败表明数据库配置或连接存在问题。
