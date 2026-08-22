@@ -82,4 +82,69 @@ pytest
 - `API_HOST`: 监听地址（默认: "0.0.0.0"）
 - `API_PORT`: 监听端口（默认: 8000）
 
-创建 `.env` 文件或设置环境变量来覆盖默认值。
+### 必需的数据库配置
+
+- `DATABASE_URL`: PostgreSQL 连接字符串（**必需**）
+
+**格式**：
+```
+postgresql://username:password@host:port/database_name
+```
+
+**示例**：
+```
+DATABASE_URL=postgresql://flyweave:devpassword@localhost:5432/flyweave_dev
+```
+
+创建 `.env` 文件或设置环境变量来配置。DATABASE_URL 是唯一的数据库连接源，不支持硬编码凭据。
+
+## 数据库设置
+
+### 本地 PostgreSQL 开发环境
+
+应用需要一个可访问的 PostgreSQL 实例。确保：
+
+1. PostgreSQL 服务正在运行
+2. 已创建目标数据库
+3. DATABASE_URL 环境变量指向该实例
+
+### 数据库迁移
+
+本项目使用 Alembic 管理数据库 schema 迁移。
+
+**生成新迁移**：
+```bash
+cd apps/api
+.venv/Scripts/python.exe -m alembic revision --autogenerate -m "描述变更"
+```
+
+**应用迁移**：
+```bash
+cd apps/api
+.venv/Scripts/python.exe -m alembic upgrade head
+```
+
+**查看迁移历史**：
+```bash
+cd apps/api
+.venv/Scripts/python.exe -m alembic history
+```
+
+**回滚迁移**：
+```bash
+cd apps/api
+.venv/Scripts/python.exe -m alembic downgrade -1
+```
+
+迁移脚本存储在 `migrations/versions/` 目录，由 Alembic 基于 `database.py` 中的 SQLAlchemy 模型自动生成。
+
+## 数据库连接验证
+
+运行数据库连接烟雾测试：
+
+```bash
+cd apps/api
+pytest tests/test_database.py -v
+```
+
+此测试会验证 DATABASE_URL 配置并执行真实的 PostgreSQL 连接检查。测试失败表明数据库配置或连接存在问题。
