@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import ServiceOperationsDashboard from './views/ServiceOperationsDashboard.vue'
 import TicketDetailView from './views/TicketDetailView.vue'
 import AgentRunView from './views/AgentRunView.vue'
+import ApprovalInboxView from './views/ApprovalInboxView.vue'
 
 const appName = ref('Flyweave')
 
@@ -55,6 +56,8 @@ const agentRunTicketKey = computed<string | null>(() => {
   return match ? decodeURIComponent(match[1]) : null
 })
 
+const isApprovalInbox = computed<boolean>(() => currentHash.value === '#/approvals')
+
 onMounted(() => {
   checkBackendHealth()
   window.addEventListener('hashchange', handleHashChange)
@@ -80,6 +83,7 @@ onUnmounted(() => {
     <main>
       <AgentRunView v-if="agentRunTicketKey" :ticket-key="agentRunTicketKey" />
       <TicketDetailView v-else-if="ticketDetailKey" :ticket-key="ticketDetailKey" />
+      <ApprovalInboxView v-else-if="isApprovalInbox" />
       <ServiceOperationsDashboard v-else />
     </main>
   </div>

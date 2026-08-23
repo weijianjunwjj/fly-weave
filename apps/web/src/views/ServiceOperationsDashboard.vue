@@ -51,8 +51,15 @@ onMounted(loadTickets)
 <template>
   <div class="dashboard">
     <header class="dashboard-header">
-      <h1>Service Operations</h1>
-      <p>售后服务运营总览</p>
+      <div class="header-top">
+        <div>
+          <h1>Service Operations</h1>
+          <p>售后服务运营总览</p>
+        </div>
+        <a class="approval-inbox-link" href="#/approvals" data-testid="approval-inbox-entry">
+          审批收件箱（Approval Inbox）→
+        </a>
+      </div>
     </header>
 
     <section class="metrics" aria-label="运营指标（演示数据）">
@@ -105,6 +112,30 @@ onMounted(loadTickets)
 .dashboard-header h1 {
   margin: 0;
   font-size: 1.75rem;
+}
+
+.header-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.approval-inbox-link {
+  flex: none;
+  display: inline-block;
+  font-size: 0.9rem;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid #3949ab;
+  border-radius: 6px;
+  background: #3949ab;
+  color: #ffffff;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.approval-inbox-link:hover {
+  background: #303f9f;
 }
 
 .dashboard-header p {
