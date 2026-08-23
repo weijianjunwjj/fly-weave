@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import ServiceOperationsDashboard from './views/ServiceOperationsDashboard.vue'
+import TicketDetailPlaceholder from './views/TicketDetailPlaceholder.vue'
 
 const appName = ref('Flyweave')
 
@@ -36,7 +38,25 @@ async function checkBackendHealth(): Promise<void> {
   }
 }
 
-onMounted(checkBackendHealth)
+const currentHash = ref(window.location.hash)
+
+function handleHashChange(): void {
+  currentHash.value = window.location.hash
+}
+
+const ticketDetailKey = computed<string | null>(() => {
+  const match = currentHash.value.match(/^#\/tickets\/(.+)$/)
+  return match ? decodeURIComponent(match[1]) : null
+})
+
+onMounted(() => {
+  checkBackendHealth()
+  window.addEventListener('hashchange', handleHashChange)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('hashchange', handleHashChange)
+})
 </script>
 
 <template>
@@ -50,6 +70,11 @@ onMounted(checkBackendHealth)
       <span v-else-if="healthStatus === 'connected'">后端已连接</span>
       <span v-else>后端连接失败</span>
     </section>
+
+    <main>
+      <TicketDetailPlaceholder v-if="ticketDetailKey" :ticket-key="ticketDetailKey" />
+      <ServiceOperationsDashboard v-else />
+    </main>
   </div>
 </template>
 

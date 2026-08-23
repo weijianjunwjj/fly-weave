@@ -1,10 +1,18 @@
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+# 必须在任何应用模块（config / database / main）被导入之前加载 .env。
+# config.Settings() 与 database.create_engine() 都在模块导入期执行，
+# 若此时 DATABASE_URL 尚未就绪，pytest 会在收集阶段直接失败。
+# 这里用绝对路径加载 apps/api/.env，避免依赖 pytest 的当前工作目录。
+API_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(API_DIR / ".env")
+
 import pytest
 from alembic import command
 from alembic.config import Config
 
-API_DIR = Path(__file__).resolve().parent.parent
 ALEMBIC_INI_PATH = API_DIR / "alembic.ini"
 MIGRATIONS_PATH = API_DIR / "migrations"
 

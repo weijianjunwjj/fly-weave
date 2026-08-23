@@ -1,8 +1,13 @@
-from fastapi import FastAPI
+from datetime import datetime
+
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from config import settings
+from database import get_db
+from models import Ticket
 
 
 app = FastAPI(title=settings.app_name)
@@ -31,6 +36,35 @@ async def health_check() -> HealthResponse:
         app_name=settings.app_name,
         environment=settings.app_env
     )
+
+
+class TicketResponse(BaseModel):
+    """工单只读响应模型"""
+    business_key: str
+    subject: str
+    description: str
+    status: str
+    demo_scenario: str | None
+    is_demo_data: bool
+    created_at: datetime
+
+
+@app.get("/tickets", response_model=list[TicketResponse])
+async def list_tickets(db: Session = Depends(get_db)) -> list[TicketResponse]:
+    """返回已持久化的工单，按创建时间排序"""
+    tickets = db.query(Ticket).order_by(Ticket.created_at.asc()).all()
+    return [
+        TicketResponse(
+            business_key=ticket.business_key,
+            subject=ticket.subject,
+            description=ticket.description,
+            status=ticket.status.value,
+            demo_scenario=ticket.demo_scenario,
+            is_demo_data=ticket.is_demo_data,
+            created_at=ticket.created_at,
+        )
+        for ticket in tickets
+    ]
 
 
 if __name__ == "__main__":
