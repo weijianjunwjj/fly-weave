@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import ServiceOperationsDashboard from './views/ServiceOperationsDashboard.vue'
-import TicketDetailPlaceholder from './views/TicketDetailPlaceholder.vue'
+import TicketDetailView from './views/TicketDetailView.vue'
 
 const appName = ref('Flyweave')
 
@@ -72,7 +72,7 @@ onUnmounted(() => {
     </section>
 
     <main>
-      <TicketDetailPlaceholder v-if="ticketDetailKey" :ticket-key="ticketDetailKey" />
+      <TicketDetailView v-if="ticketDetailKey" :ticket-key="ticketDetailKey" />
       <ServiceOperationsDashboard v-else />
     </main>
   </div>
