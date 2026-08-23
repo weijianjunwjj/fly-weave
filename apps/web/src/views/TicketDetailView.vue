@@ -171,20 +171,19 @@ watch(
         <section class="panel agent-run-panel" aria-label="Agent Run 入口">
           <div class="agent-run-header">
             <h2>Agent Run</h2>
-            <span class="not-available-tag">尚未实现</span>
+            <span class="structure-preview-tag">结构预览</span>
           </div>
           <p class="agent-run-note">
-            Agent 执行能力尚未实现。此处仅为后续 Agent Run 的入口位置，点击不会启动任何运行，
-            系统也没有产生任何模型输出、工具调用、审批状态或执行结果。
+            真实 Agent 执行能力尚未实现。此入口用于查看 Agent Run 的 UI 结构预览，
+            不会启动任何运行，也不会产生模型输出、工具调用、审批状态或执行结果。
           </p>
-          <button
-            type="button"
-            class="agent-run-button"
-            disabled
+          <a
+            class="agent-run-link"
+            :href="`#/tickets/${ticket.business_key}/agent-run`"
             data-testid="agent-run-entry"
           >
-            启动 Agent Run（不可用）
-          </button>
+            查看 Agent Run 结构预览
+          </a>
         </section>
       </div>
     </template>
@@ -324,7 +323,7 @@ watch(
   margin: 0;
 }
 
-.not-available-tag {
+.structure-preview-tag {
   font-size: 0.7rem;
   font-weight: 600;
   color: #455a64;
@@ -341,14 +340,19 @@ watch(
   line-height: 1.6;
 }
 
-.agent-run-button {
+.agent-run-link {
+  display: inline-block;
   font: inherit;
   font-size: 0.9rem;
   padding: 0.5rem 1rem;
-  border: 1px solid #cfd8dc;
+  border: 1px solid #3949ab;
   border-radius: 6px;
-  background: #eceff1;
-  color: #90a4ae;
-  cursor: not-allowed;
+  background: #3949ab;
+  color: #ffffff;
+  text-decoration: none;
+}
+
+.agent-run-link:hover {
+  background: #303f9f;
 }
 </style>

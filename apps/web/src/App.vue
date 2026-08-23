@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import ServiceOperationsDashboard from './views/ServiceOperationsDashboard.vue'
 import TicketDetailView from './views/TicketDetailView.vue'
+import AgentRunView from './views/AgentRunView.vue'
 
 const appName = ref('Flyweave')
 
@@ -45,7 +46,12 @@ function handleHashChange(): void {
 }
 
 const ticketDetailKey = computed<string | null>(() => {
-  const match = currentHash.value.match(/^#\/tickets\/(.+)$/)
+  const match = currentHash.value.match(/^#\/tickets\/([^/]+)$/)
+  return match ? decodeURIComponent(match[1]) : null
+})
+
+const agentRunTicketKey = computed<string | null>(() => {
+  const match = currentHash.value.match(/^#\/tickets\/([^/]+)\/agent-run$/)
   return match ? decodeURIComponent(match[1]) : null
 })
 
@@ -72,7 +78,8 @@ onUnmounted(() => {
     </section>
 
     <main>
-      <TicketDetailView v-if="ticketDetailKey" :ticket-key="ticketDetailKey" />
+      <AgentRunView v-if="agentRunTicketKey" :ticket-key="agentRunTicketKey" />
+      <TicketDetailView v-else-if="ticketDetailKey" :ticket-key="ticketDetailKey" />
       <ServiceOperationsDashboard v-else />
     </main>
   </div>
