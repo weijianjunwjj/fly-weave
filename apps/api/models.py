@@ -11,6 +11,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 
@@ -33,6 +34,25 @@ class OrderStatus(PyEnum):
     SHIPPED = "shipped"
     DELIVERED = "delivered"
     CANCELLED = "cancelled"
+
+
+class AgentRunStatus(PyEnum):
+    """Agent Run 状态。waiting_for_approval 使一次 Run 能够跨人工审批暂停并恢复"""
+    QUEUED = "queued"
+    RUNNING = "running"
+    WAITING_FOR_APPROVAL = "waiting_for_approval"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class AgentStepStatus(PyEnum):
+    """Agent Run 内单个步骤的状态"""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
 
 
 class Customer(Base):
@@ -129,3 +149,80 @@ class Ticket(Base):
 
     customer = relationship("Customer", back_populates="tickets")
     order = relationship("Order", back_populates="tickets")
+    agent_runs = relationship("AgentRun", back_populates="ticket")
+
+
+class AgentRun(Base):
+    """
+    一次 Agent 执行的持久化状态。
+
+    Run 被建模为独立于 HTTP 请求生命周期的应用状态：状态、时间戳与失败原因
+    全部落库，因此一次 Run 可以在请求结束后继续存在、跨人工审批暂停并恢复，
+    失败的 Run 也会持续可见为 failed。
+
+    本模型只描述执行状态，不包含任何执行、调度或工具调用行为。
+    """
+    __tablename__ = "agent_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # 与其它领域模型一致的稳定业务标识符，供 API / UI 寻址某次 Run，
+    # 避免对外暴露自增主键
+    business_key = Column(String(64), unique=True, nullable=False, index=True)
+    # 一次 Run 始终归属于一个工单。ON DELETE CASCADE 保证 demo 数据重置
+    # （clear_demo_data 直接批量删除 tickets）保持可重复，不会因残留 Run 失败
+    ticket_id = Column(
+        Integer, ForeignKey("tickets.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    status = Column(
+        Enum(AgentRunStatus, name="agentrunstatus", values_callable=lambda enum_cls: [member.value for member in enum_cls]),
+        nullable=False,
+        default=AgentRunStatus.QUEUED,
+    )
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    # 尚未开始 / 尚未结束的 Run 保持为 NULL，不用占位时间伪造执行事实
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    # 失败原因持久化，使失败的 Run 在事后仍可解释
+    error_message = Column(Text, nullable=True)
+
+    ticket = relationship("Ticket", back_populates="agent_runs")
+    steps = relationship(
+        "AgentStep",
+        back_populates="agent_run",
+        order_by="AgentStep.step_order",
+        cascade="all, delete-orphan",
+    )
+
+
+class AgentStep(Base):
+    """
+    Agent Run 中的单个步骤记录。
+
+    步骤通过显式的 step_order 排序，使时间线查询结果确定、不依赖插入顺序或
+    时间戳精度。步骤只记录名称与状态，工具调用、模型输出与 trace 数据不在
+    本任务范围内。
+    """
+    __tablename__ = "agent_steps"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    agent_run_id = Column(
+        Integer, ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # 同一次 Run 内的步骤序号，从 1 开始，保证时间线顺序确定
+    step_order = Column(Integer, nullable=False)
+    name = Column(String(128), nullable=False)
+    status = Column(
+        Enum(AgentStepStatus, name="agentstepstatus", values_callable=lambda enum_cls: [member.value for member in enum_cls]),
+        nullable=False,
+        default=AgentStepStatus.PENDING,
+    )
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    agent_run = relationship("AgentRun", back_populates="steps")
+
+    __table_args__ = (
+        UniqueConstraint("agent_run_id", "step_order", name="uq_agent_steps_run_step_order"),
+    )
