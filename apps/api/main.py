@@ -5,18 +5,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
+from agent_run_service import run_golden_path
 from config import settings
 from database import get_db
-from models import Ticket
+from models import AgentRun, Ticket
 
 
 app = FastAPI(title=settings.app_name)
 
-# 允许本地前端开发服务器（Vite 默认端口）跨域访问健康检查等接口
+# 允许本地前端开发服务器（Vite 默认端口）跨域访问健康检查等接口。
+# POST 是 T018 启动 Agent Run 所需：整条流程由一次真实的后端请求驱动。
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -148,6 +150,169 @@ async def get_ticket_detail(
         if order is not None
         else None,
     )
+
+
+class AgentStepResponse(BaseModel):
+    """Agent Run 时间线上的一个真实步骤。
+
+    步骤只有在对应服务真实返回之后才会被写入，因此这里出现的每一条都代表一次
+    已经发生的执行；``error_message`` 是那次执行的结构化失败原因。
+    """
+    step_order: int
+    name: str
+    status: str
+    started_at: datetime | None
+    completed_at: datetime | None
+    error_message: str | None
+
+
+class AgentRunReplacementResponse(BaseModel):
+    """本次 Run 真实创建并落库的换货单"""
+    business_key: str
+    status: str
+    product_sku: str
+    reason: str
+    is_demo_data: bool
+    created_at: datetime
+
+
+class AgentRunTicketResultResponse(BaseModel):
+    """执行之后工单的真实持久化状态。
+
+    未被回写的工单，``resolution`` 等字段保持为 null —— 不用占位值伪造解决事实。
+    """
+    status: str
+    resolution: str | None
+    resolution_summary: str | None
+    resolved_at: datetime | None
+    replacement_key: str | None
+
+
+class AgentRunResponse(BaseModel):
+    """一次 Agent Run 的真实执行结果。
+
+    全部字段都在执行结束后从持久化状态读出：``status`` 为 ``completed`` 当且仅当
+    工单已被真实回写，任何 Tool 失败都会体现为 ``failed`` 与结构化的
+    ``error_message``，且失败之后的步骤根本不会出现在 ``steps`` 中。
+    """
+    business_key: str
+    ticket_key: str
+    status: str
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    error_message: str | None
+    steps: list[AgentStepResponse]
+    replacement: AgentRunReplacementResponse | None
+    ticket_result: AgentRunTicketResultResponse
+
+
+def _agent_run_response(agent_run: AgentRun) -> AgentRunResponse:
+    """把已持久化的 Run 映射为响应模型，不做任何状态推断或补齐"""
+    ticket = agent_run.ticket
+    replacement = agent_run.replacement
+    resolution_replacement = ticket.resolution_replacement
+
+    return AgentRunResponse(
+        business_key=agent_run.business_key,
+        ticket_key=ticket.business_key,
+        status=agent_run.status.value,
+        created_at=agent_run.created_at,
+        started_at=agent_run.started_at,
+        completed_at=agent_run.completed_at,
+        error_message=agent_run.error_message,
+        # 关系上已按 step_order 排序，时间线顺序即真实执行顺序
+        steps=[
+            AgentStepResponse(
+                step_order=step.step_order,
+                name=step.name,
+                status=step.status.value,
+                started_at=step.started_at,
+                completed_at=step.completed_at,
+                error_message=step.error_message,
+            )
+            for step in agent_run.steps
+        ],
+        replacement=AgentRunReplacementResponse(
+            business_key=replacement.business_key,
+            status=replacement.status.value,
+            product_sku=replacement.product_sku,
+            reason=replacement.reason,
+            is_demo_data=replacement.is_demo_data,
+            created_at=replacement.created_at,
+        )
+        if replacement is not None
+        else None,
+        ticket_result=AgentRunTicketResultResponse(
+            status=ticket.status.value,
+            resolution=ticket.resolution.value if ticket.resolution is not None else None,
+            resolution_summary=ticket.resolution_summary,
+            resolved_at=ticket.resolved_at,
+            replacement_key=(
+                resolution_replacement.business_key
+                if resolution_replacement is not None
+                else None
+            ),
+        ),
+    )
+
+
+def _require_ticket(db: Session, business_key: str) -> Ticket:
+    """取回工单，不存在时返回诚实的 404"""
+    ticket = (
+        db.query(Ticket)
+        .options(joinedload(Ticket.order))
+        .filter(Ticket.business_key == business_key)
+        .one_or_none()
+    )
+    if ticket is None:
+        raise HTTPException(status_code=404, detail=f"未找到工单: {business_key}")
+    return ticket
+
+
+@app.post(
+    "/tickets/{business_key}/agent-runs",
+    response_model=AgentRunResponse,
+    status_code=201,
+)
+async def start_agent_run(
+    business_key: str, db: Session = Depends(get_db)
+) -> AgentRunResponse:
+    """启动并同步执行一次完整的 Agent Run。
+
+    这是 T018 的单次启动入口：一次请求真实驱动 intent → 政策 → 订单 → 库存 →
+    判定 → 换货 → 工单回写整条流程。HTTP 201 只表示"这次 Run 已被创建并执行
+    完毕"，执行成功与否一律以响应体中的 ``status`` 为准 —— Tool 失败时它是
+    ``failed``，绝不会因为请求本身完成就显示为成功。
+    """
+    ticket = _require_ticket(db, business_key)
+    agent_run = run_golden_path(db, ticket)
+    return _agent_run_response(agent_run)
+
+
+@app.get(
+    "/tickets/{business_key}/agent-runs/latest",
+    response_model=AgentRunResponse,
+)
+async def get_latest_agent_run(
+    business_key: str, db: Session = Depends(get_db)
+) -> AgentRunResponse:
+    """返回该工单最近一次真实执行的 Agent Run。
+
+    工单从未执行过 Run 时返回 404，而不是一个空壳 Run：没有执行就是没有执行。
+    """
+    ticket = _require_ticket(db, business_key)
+    agent_run = (
+        db.query(AgentRun)
+        .filter(AgentRun.ticket_id == ticket.id)
+        .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+        .first()
+    )
+    if agent_run is None:
+        raise HTTPException(
+            status_code=404, detail=f"工单 {business_key} 尚未执行过 Agent Run"
+        )
+    return _agent_run_response(agent_run)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,167 @@
+import { TicketNotFoundError } from './ticketsApi'
+
+/**
+ * Agent Run 时间线上的一个真实步骤。
+ *
+ * 后端只在对应 Tool 真实返回之后才写入步骤，因此这里的每一条都代表一次已经发生
+ * 的执行。前端不补齐、不排序、不推断状态，只按后端给出的顺序原样展示。
+ */
+export interface AgentRunStep {
+  step_order: number
+  name: string
+  status: string
+  started_at: string | null
+  completed_at: string | null
+  error_message: string | null
+}
+
+/** 本次 Run 真实创建并落库的换货单 */
+export interface AgentRunReplacement {
+  business_key: string
+  status: string
+  product_sku: string
+  reason: string
+  is_demo_data: boolean
+  created_at: string
+}
+
+/** 执行之后工单的真实持久化状态；未被回写时各结果字段保持 null */
+export interface AgentRunTicketResult {
+  status: string
+  resolution: string | null
+  resolution_summary: string | null
+  resolved_at: string | null
+  replacement_key: string | null
+}
+
+export interface AgentRunRecord {
+  business_key: string
+  ticket_key: string
+  status: string
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+  error_message: string | null
+  steps: AgentRunStep[]
+  replacement: AgentRunReplacement | null
+  ticket_result: AgentRunTicketResult
+}
+
+const TICKETS_ENDPOINT = 'http://localhost:8000/tickets'
+
+/** 工单存在但从未执行过 Agent Run 时抛出，用于与网络 / 服务故障区分 */
+export class AgentRunNotFoundError extends Error {
+  constructor(ticketKey: string) {
+    super(`工单 ${ticketKey} 尚未执行过 Agent Run`)
+    this.name = 'AgentRunNotFoundError'
+  }
+}
+
+function isNullableString(value: unknown): boolean {
+  return typeof value === 'string' || value === null
+}
+
+function isAgentRunStep(value: unknown): value is AgentRunStep {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.step_order === 'number' &&
+    typeof record.name === 'string' &&
+    typeof record.status === 'string' &&
+    isNullableString(record.started_at) &&
+    isNullableString(record.completed_at) &&
+    isNullableString(record.error_message)
+  )
+}
+
+function isAgentRunReplacement(value: unknown): value is AgentRunReplacement {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.business_key === 'string' &&
+    typeof record.status === 'string' &&
+    typeof record.product_sku === 'string' &&
+    typeof record.reason === 'string' &&
+    typeof record.is_demo_data === 'boolean' &&
+    typeof record.created_at === 'string'
+  )
+}
+
+function isAgentRunTicketResult(value: unknown): value is AgentRunTicketResult {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.status === 'string' &&
+    isNullableString(record.resolution) &&
+    isNullableString(record.resolution_summary) &&
+    isNullableString(record.resolved_at) &&
+    isNullableString(record.replacement_key)
+  )
+}
+
+function isAgentRunRecord(value: unknown): value is AgentRunRecord {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.business_key === 'string' &&
+    typeof record.ticket_key === 'string' &&
+    typeof record.status === 'string' &&
+    typeof record.created_at === 'string' &&
+    isNullableString(record.started_at) &&
+    isNullableString(record.completed_at) &&
+    isNullableString(record.error_message) &&
+    Array.isArray(record.steps) &&
+    record.steps.every(isAgentRunStep) &&
+    (record.replacement === null || isAgentRunReplacement(record.replacement)) &&
+    isAgentRunTicketResult(record.ticket_result)
+  )
+}
+
+function parseAgentRun(data: unknown): AgentRunRecord {
+  if (!isAgentRunRecord(data)) {
+    throw new Error('Agent Run 接口返回了非预期的数据结构')
+  }
+  return data
+}
+
+/**
+ * 启动一次真实的 Agent Run，并返回执行结束后的真实结果。
+ *
+ * HTTP 201 只表示"这次 Run 已被创建并执行完毕"。执行成功与否一律以返回记录中的
+ * ``status`` 为准：Tool 失败时它是 ``failed``，前端不会因为请求成功就显示成功。
+ */
+export async function startAgentRun(ticketKey: string): Promise<AgentRunRecord> {
+  const response = await fetch(
+    `${TICKETS_ENDPOINT}/${encodeURIComponent(ticketKey)}/agent-runs`,
+    { method: 'POST' }
+  )
+  if (response.status === 404) {
+    throw new TicketNotFoundError(ticketKey)
+  }
+  if (!response.ok) {
+    throw new Error(`Agent Run 启动接口返回异常状态: ${response.status}`)
+  }
+  return parseAgentRun(await response.json())
+}
+
+/** 读取该工单最近一次真实执行的 Agent Run；从未执行过时抛出 AgentRunNotFoundError */
+export async function fetchLatestAgentRun(ticketKey: string): Promise<AgentRunRecord> {
+  const response = await fetch(
+    `${TICKETS_ENDPOINT}/${encodeURIComponent(ticketKey)}/agent-runs/latest`
+  )
+  if (response.status === 404) {
+    throw new AgentRunNotFoundError(ticketKey)
+  }
+  if (!response.ok) {
+    throw new Error(`Agent Run 接口返回异常状态: ${response.status}`)
+  }
+  return parseAgentRun(await response.json())
+}

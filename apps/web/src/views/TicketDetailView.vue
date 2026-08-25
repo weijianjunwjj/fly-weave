@@ -171,18 +171,17 @@ watch(
         <section class="panel agent-run-panel" aria-label="Agent Run 入口">
           <div class="agent-run-header">
             <h2>Agent Run</h2>
-            <span class="structure-preview-tag">结构预览</span>
           </div>
           <p class="agent-run-note">
-            真实 Agent 执行能力尚未实现。此入口用于查看 Agent Run 的 UI 结构预览，
-            不会启动任何运行，也不会产生模型输出、工具调用、审批状态或执行结果。
+            进入 Agent Run 页面可查看本工单已有的真实执行记录，并启动一次完整流程。
+            执行由后端真实驱动，时间线上的每一步与最终结果都来自实际的工具调用。
           </p>
           <a
             class="agent-run-link"
             :href="`#/tickets/${ticket.business_key}/agent-run`"
             data-testid="agent-run-entry"
           >
-            查看 Agent Run 结构预览
+            查看 / 启动 Agent Run
           </a>
         </section>
       </div>
@@ -321,16 +320,6 @@ watch(
 
 .agent-run-header h2 {
   margin: 0;
-}
-
-.structure-preview-tag {
-  font-size: 0.7rem;
-  font-weight: 600;
-  color: #455a64;
-  background: #eceff1;
-  border: 1px solid #b0bec5;
-  border-radius: 4px;
-  padding: 0.15rem 0.5rem;
 }
 
 .agent-run-note {
