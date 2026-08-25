@@ -6,6 +6,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Integer,
     Numeric,
@@ -192,6 +193,13 @@ class AgentRun(Base):
         order_by="AgentStep.step_order",
         cascade="all, delete-orphan",
     )
+    # T011：一次 Run 至多关联一条已验证的结构化 intent
+    intent = relationship(
+        "AgentIntent",
+        back_populates="agent_run",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
 
 class AgentStep(Base):
@@ -226,3 +234,30 @@ class AgentStep(Base):
     __table_args__ = (
         UniqueConstraint("agent_run_id", "step_order", name="uq_agent_steps_run_step_order"),
     )
+
+
+class AgentIntent(Base):
+    """
+    已验证的结构化 intent 持久化记录。
+
+    这是 T011 的 intent 抽取结果，以类型化字段（而非自由 JSON）落库，关联到
+    产生它的 AgentRun，可事后查询。只有通过 validation boundary 的成功 intent
+    才会被写入本表；失败只体现在 AgentStep 的 failed 状态与结构化失败原因中。
+    """
+    __tablename__ = "agent_intents"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    agent_run_id = Column(
+        Integer,
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    intent_type = Column(String(64), nullable=False)
+    issue_summary = Column(Text, nullable=False)
+    requested_action = Column(String(64), nullable=False)
+    confidence = Column(Float, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    agent_run = relationship("AgentRun", back_populates="intent")
