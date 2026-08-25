@@ -56,6 +56,16 @@ class AgentStepStatus(PyEnum):
     SKIPPED = "skipped"
 
 
+class ReplacementStatus(PyEnum):
+    """换货单状态。
+
+    当前只存在 ``CREATED`` 这一个真实状态：T016 只负责"换货单已被真实创建"
+    这一业务事实。发货、取消、完成等后续状态在当前 domain 中尚不存在真实的
+    状态迁移来源，因此不预先编造。
+    """
+    CREATED = "created"
+
+
 class Customer(Base):
     """客户 / 客户引用信息"""
     __tablename__ = "customers"
@@ -207,6 +217,13 @@ class AgentRun(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+    # T016：一次 Run 至多执行一次换货这一受保护的业务变更
+    replacement = relationship(
+        "ReplacementOrder",
+        back_populates="agent_run",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
 
 class AgentStep(Base):
@@ -304,3 +321,64 @@ class AgentInventoryCheck(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     agent_run = relationship("AgentRun", back_populates="inventory_check")
+
+
+class ReplacementOrder(Base):
+    """
+    换货单：Golden Path 上第一个真实的业务状态变更结果（T016）。
+
+    与 AgentIntent / AgentInventoryCheck 这类"Agent 执行痕迹"不同，换货单是
+    真正的业务对象：它的存在本身就是"换货已经发生"的权威事实。模型文本无法
+    创建它，只有 ``replacement_service`` 在校验全部前置条件后写入。
+
+    三条业务关联全部落库，保持现有 domain 已要求的关系完整：
+
+    - ``order_id``：被换货的真实订单；
+    - ``ticket_id``：发起该换货的客服工单；
+    - ``agent_run_id``：执行该换货的那次 Agent Run。
+
+    重复执行由持久化状态而非进程内状态阻止：``order_id`` 唯一保证一个订单至多
+    一张换货单，``agent_run_id`` 唯一保证一次 Run 至多执行一次该受保护动作。
+    这两个约束在数据库层生效，因此并发或重放都无法绕过。
+
+    三个外键都使用 ON DELETE CASCADE，与 AgentRun 一致，使 demo 数据重置
+    （clear_demo_data 批量删除 tickets / orders）保持可重复。
+    """
+    __tablename__ = "replacement_orders"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # 由订单业务标识确定性派生（replacement-<order_key>），因此同一订单的换货单
+    # 标识稳定可预期。列宽 = 固定前缀 12 + Order.business_key 列宽 64
+    business_key = Column(String(80), unique=True, nullable=False, index=True)
+    order_id = Column(
+        Integer,
+        ForeignKey("orders.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    ticket_id = Column(
+        Integer, ForeignKey("tickets.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    agent_run_id = Column(
+        Integer,
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    product_sku = Column(String(64), nullable=False)
+    # 换货原因来自已验证 intent 的问题摘要，经由 typed 请求传入
+    reason = Column(Text, nullable=False)
+    status = Column(
+        Enum(ReplacementStatus, name="replacementstatus", values_callable=lambda enum_cls: [member.value for member in enum_cls]),
+        nullable=False,
+        default=ReplacementStatus.CREATED,
+    )
+    # 与订单保持一致的演示数据标记，避免模拟换货与生产换货混淆
+    is_demo_data = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    order = relationship("Order")
+    ticket = relationship("Ticket")
+    agent_run = relationship("AgentRun", back_populates="replacement")
