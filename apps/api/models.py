@@ -200,6 +200,13 @@ class AgentRun(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+    # T014：一次 Run 至多关联一条 check_inventory 的实际调用记录
+    inventory_check = relationship(
+        "AgentInventoryCheck",
+        back_populates="agent_run",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
 
 class AgentStep(Base):
@@ -261,3 +268,39 @@ class AgentIntent(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     agent_run = relationship("AgentRun", back_populates="intent")
+
+
+class AgentInventoryCheck(Base):
+    """
+    check_inventory 的实际调用记录（T014）。
+
+    与 AgentIntent 同一思路：把一次真实 Tool 调用的结果以类型化字段（而非
+    自由 JSON）落库，关联到产生它的 AgentRun。只有真实执行的库存查询才会被
+    写入本表，记录的内容全部来自 ``InventoryCheckResult``：
+
+    - ``status``：success / unavailable / sku_not_found / invalid_request；
+    - ``available_quantity`` / ``warehouse`` / ``is_demo_data``：查询到的真实
+      库存事实；查无 SKU 或非法输入时保持 NULL，不伪造可用性；
+    - ``failure_reason``：失败路径的结构化原因，成功 / 无货时为 NULL。
+
+    每次 Run 至多一条（agent_run_id 唯一），并随 Run 的删除一并清理。
+    """
+    __tablename__ = "agent_inventory_checks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    agent_run_id = Column(
+        Integer,
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    requested_sku = Column(String(64), nullable=True)
+    status = Column(String(32), nullable=False)
+    available_quantity = Column(Integer, nullable=True)
+    warehouse = Column(String(64), nullable=True)
+    is_demo_data = Column(Boolean, nullable=True)
+    failure_reason = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    agent_run = relationship("AgentRun", back_populates="inventory_check")
