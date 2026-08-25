@@ -56,6 +56,16 @@ class AgentStepStatus(PyEnum):
     SKIPPED = "skipped"
 
 
+class TicketResolution(PyEnum):
+    """工单解决结果（T017）。
+
+    当前只有 ``REPLACEMENT_CREATED`` 这一个真实取值：Golden Path 上唯一已经
+    存在的解决方式就是"换货单已被真实创建"。退款、补发、话术安抚等结果在当前
+    domain 中没有任何真实执行路径可以产生它们，因此不预先编造。
+    """
+    REPLACEMENT_CREATED = "replacement_created"
+
+
 class ReplacementStatus(PyEnum):
     """换货单状态。
 
@@ -158,9 +168,44 @@ class Ticket(Base):
     is_demo_data = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
+    # --- T017：update_ticket 回写的解决结果 ---
+    # 四个字段共同表示"这张工单已被一次真实执行解决"。未解决的工单一律保持
+    # NULL，不用占位值伪造解决事实。
+    resolution = Column(
+        Enum(TicketResolution, name="ticketresolution", values_callable=lambda enum_cls: [member.value for member in enum_cls]),
+        nullable=True,
+    )
+    resolution_summary = Column(Text, nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    # 解决结果所引用的那张真实换货单。使用外键而非文本标识，使"引用一张不存在
+    # 的换货单"在数据库层就无法成立；唯一约束保证一张换货单至多被一张工单当作
+    # 解决结果。ON DELETE SET NULL：换货单若被清理，工单不会跟着消失，但也绝不
+    # 保留一个悬空引用。
+    replacement_id = Column(
+        Integer,
+        ForeignKey(
+            "replacement_orders.id",
+            # 约束名与 0006 迁移中显式创建的名称保持一致；use_alter 使 tickets 与
+            # replacement_orders 之间的互相引用能够以独立 ALTER 表达
+            name="fk_tickets_replacement_id_replacement_orders",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+
     customer = relationship("Customer", back_populates="tickets")
     order = relationship("Order", back_populates="tickets")
     agent_runs = relationship("AgentRun", back_populates="ticket")
+    # tickets 与 replacement_orders 互相引用，因此两侧都显式指定 foreign_keys；
+    # post_update 让 SQLAlchemy 以独立 UPDATE 写入本列，避免循环依赖下的 flush 排序问题
+    resolution_replacement = relationship(
+        "ReplacementOrder",
+        foreign_keys=[replacement_id],
+        post_update=True,
+    )
 
 
 class AgentRun(Base):
@@ -380,5 +425,6 @@ class ReplacementOrder(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     order = relationship("Order")
-    ticket = relationship("Ticket")
+    # 与 Ticket.resolution_replacement 构成两个方向的引用，显式指定本侧外键消歧
+    ticket = relationship("Ticket", foreign_keys=[ticket_id])
     agent_run = relationship("AgentRun", back_populates="replacement")
