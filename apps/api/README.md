@@ -96,7 +96,9 @@ postgresql://username:password@host:port/database_name
 DATABASE_URL=postgresql://flyweave:devpassword@localhost:5432/flyweave_dev
 ```
 
-创建 `.env` 文件或设置环境变量来配置。DATABASE_URL 是唯一的数据库连接源，不支持硬编码凭据。
+在 `apps/api/.env` 创建本机配置（可从 `.env.example` 复制）或设置环境变量。
+应用始终从 `apps/api/.env` 读取本机默认配置，而不依赖启动目录；系统环境变量
+`DATABASE_URL` 仍会优先覆盖该文件。DATABASE_URL 是唯一的数据库连接源，不支持硬编码凭据。
 
 ## 数据库设置
 

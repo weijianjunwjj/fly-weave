@@ -1,4 +1,10 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+API_DIR = Path(__file__).resolve().parent
+DEFAULT_ENV_FILE = API_DIR / ".env"
 
 
 class Settings(BaseSettings):
@@ -11,8 +17,11 @@ class Settings(BaseSettings):
     database_url: str
 
     model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8"
+        # Keep the local configuration contract independent from the process
+        # working directory (pytest, Alembic, and FastAPI have different entry
+        # points). Environment variables retain pydantic-settings precedence.
+        env_file=DEFAULT_ENV_FILE,
+        env_file_encoding="utf-8",
     )
 
 
