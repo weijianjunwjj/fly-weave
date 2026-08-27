@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session, joinedload
 from agent_run_service import run_golden_path
 from config import settings
 from database import get_db
-from models import AgentRun, Ticket
+from models import AgentRun, AgentRunStatus, Ticket
+from risk_service import assess_persisted_replacement_risk
 
 
 app = FastAPI(title=settings.app_name)
@@ -188,12 +189,31 @@ class AgentRunTicketResultResponse(BaseModel):
     replacement_key: str | None
 
 
+class AgentRunRiskResponse(BaseModel):
+    """T019 风险门禁给出的结构化判断，直接供 UI 展示。
+
+    前端不重新推导风险规则，只消费这里的级别、规则标识与原因文本。金额以字符串
+    返回，避免浮点精度损失并保持展示与数据库一致。
+    """
+    action: str
+    level: str
+    rule_code: str
+    requires_approval: bool
+    reason: str
+    order_key: str | None
+    order_amount: str | None
+    approval_threshold_amount: str | None
+    policy_key: str | None
+
+
 class AgentRunResponse(BaseModel):
     """一次 Agent Run 的真实执行结果。
 
     全部字段都在执行结束后从持久化状态读出：``status`` 为 ``completed`` 当且仅当
     工单已被真实回写，任何 Tool 失败都会体现为 ``failed`` 与结构化的
-    ``error_message``，且失败之后的步骤根本不会出现在 ``steps`` 中。
+    ``error_message``，且失败之后的步骤根本不会出现在 ``steps`` 中。风险门禁命中
+    时 ``status`` 为 ``waiting_for_approval``，且 ``risk`` 携带后端给出的可展示
+    原因。
     """
     business_key: str
     ticket_key: str
@@ -205,9 +225,38 @@ class AgentRunResponse(BaseModel):
     steps: list[AgentStepResponse]
     replacement: AgentRunReplacementResponse | None
     ticket_result: AgentRunTicketResultResponse
+    risk: AgentRunRiskResponse | None
 
 
-def _agent_run_response(agent_run: AgentRun) -> AgentRunResponse:
+def _risk_response(db: Session, agent_run: AgentRun) -> AgentRunRiskResponse | None:
+    """从持久化状态重新求值风险判断，供等待审批的 Run 把原因展示给 UI。
+
+    只在 Run 停在等待审批时返回：这是风险门禁真正拦下动作的场景。其余状态的
+    Run 不携带 ``risk``，避免把"没有拦下"误读成一次风险判断。
+    """
+    if agent_run.status is not AgentRunStatus.WAITING_FOR_APPROVAL:
+        return None
+    risk = assess_persisted_replacement_risk(db, agent_run)
+    if risk is None:
+        return None
+    return AgentRunRiskResponse(
+        action=risk.action.value,
+        level=risk.level.value,
+        rule_code=risk.rule_code.value,
+        requires_approval=risk.requires_approval,
+        reason=risk.reason,
+        order_key=risk.order_key,
+        order_amount=str(risk.order_amount) if risk.order_amount is not None else None,
+        approval_threshold_amount=(
+            str(risk.approval_threshold_amount)
+            if risk.approval_threshold_amount is not None
+            else None
+        ),
+        policy_key=risk.policy_key,
+    )
+
+
+def _agent_run_response(db: Session, agent_run: AgentRun) -> AgentRunResponse:
     """把已持久化的 Run 映射为响应模型，不做任何状态推断或补齐"""
     ticket = agent_run.ticket
     replacement = agent_run.replacement
@@ -221,6 +270,7 @@ def _agent_run_response(agent_run: AgentRun) -> AgentRunResponse:
         started_at=agent_run.started_at,
         completed_at=agent_run.completed_at,
         error_message=agent_run.error_message,
+        risk=_risk_response(db, agent_run),
         # 关系上已按 step_order 排序，时间线顺序即真实执行顺序
         steps=[
             AgentStepResponse(
@@ -287,7 +337,7 @@ async def start_agent_run(
     """
     ticket = _require_ticket(db, business_key)
     agent_run = run_golden_path(db, ticket)
-    return _agent_run_response(agent_run)
+    return _agent_run_response(db, agent_run)
 
 
 @app.get(
@@ -312,7 +362,7 @@ async def get_latest_agent_run(
         raise HTTPException(
             status_code=404, detail=f"工单 {business_key} 尚未执行过 Agent Run"
         )
-    return _agent_run_response(agent_run)
+    return _agent_run_response(db, agent_run)
 
 
 if __name__ == "__main__":

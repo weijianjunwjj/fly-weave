@@ -13,6 +13,7 @@
 
 判定证据全部经由 T011~T015 的真实实现从 seeded 数据产生，而不是手工编造。
 """
+from decimal import Decimal
 import json
 
 import pytest
@@ -296,27 +297,107 @@ def test_replacement_survives_a_new_session():
         db.close()
 
 
-def test_distinct_orders_can_each_have_a_replacement():
-    """一个订单一张换货单的约束是按订单生效的，不会误伤另一个真实案例"""
+def test_high_value_order_is_blocked_before_persistence():
+    """高金额 eligible 案例命中风险门禁：返回等待审批，且绝不创建换货单。"""
     db = SessionLocal()
     try:
-        first_run = _create_run(db, "multi-001", LOW_RISK_TICKET_KEY)
-        first = create_replacement(
-            db, first_run, _request(), _eligible_decision(db)
-        )
-        assert first.status is CreateReplacementStatus.CREATED
-
-        second_run = _create_run(db, "multi-002", HIGH_VALUE_TICKET_KEY)
-        second = create_replacement(
+        run = _create_run(
             db,
-            second_run,
-            _request(HIGH_VALUE_ORDER_KEY),
-            _eligible_decision(db, HIGH_VALUE_ORDER_KEY),
+            "risk-gate-001",
+            HIGH_VALUE_TICKET_KEY,
         )
-        assert second.status is CreateReplacementStatus.CREATED
+        decision = _eligible_decision(
+            db,
+            HIGH_VALUE_ORDER_KEY,
+        )
 
-        assert len(_persisted_replacements(db, LOW_RISK_ORDER_KEY)) == 1
-        assert len(_persisted_replacements(db, HIGH_VALUE_ORDER_KEY)) == 1
+        # T015 仍然认为业务条件 eligible。
+        # T019 的职责不是改写业务判定，而是在真正副作用发生之前加风险闸门。
+        assert decision.status is ReplacementDecisionStatus.ELIGIBLE
+
+        # 执行前确认没有历史换货单，避免测试被旧状态污染。
+        assert _persisted_replacements(db, HIGH_VALUE_ORDER_KEY) == []
+
+        result = create_replacement(
+            db,
+            run,
+            _request(HIGH_VALUE_ORDER_KEY),
+            decision,
+        )
+
+        # 命中风险规则不是失败，也不是成功，而是明确等待人工审批。
+        assert result.status is CreateReplacementStatus.APPROVAL_REQUIRED
+        assert result.replacement is None
+        assert result.existing_replacement_key is None
+        assert result.failure_reason is not None
+
+        # 风险判断必须是结构化事实，而不是只有一段自由文本。
+        assert result.risk is not None
+        assert result.risk.requires_approval is True
+        assert result.risk.level.value == "high"
+        assert (
+            result.risk.rule_code.value
+            == "order_amount_above_approval_threshold"
+        )
+
+        # 风险判断保留完整规则依据。
+        assert result.risk.order_key == HIGH_VALUE_ORDER_KEY
+        assert result.risk.order_amount is not None
+        assert result.risk.approval_threshold_amount is not None
+        assert result.risk.policy_key is not None
+        assert (
+            result.risk.order_amount
+            > result.risk.approval_threshold_amount
+        )
+
+        # 最关键的验收：
+        # 风险门禁必须真正站在持久化副作用之前。
+        assert _persisted_replacements(db, HIGH_VALUE_ORDER_KEY) == []
+
+        assert (
+            db.query(ReplacementOrder)
+            .filter(ReplacementOrder.agent_run_id == run.id)
+            .one_or_none()
+            is None
+        )
+
+        # create_replacement 这一步没有成功也没有失败，
+        # 它停在 pending，等待更上层 AgentRun 切换为 waiting_for_approval。
+        step = _replacement_step(db, run.id)
+        assert step.status is AgentStepStatus.PENDING
+        assert step.completed_at is None
+        assert step.error_message is not None
+        assert "approval_required" in step.error_message
+        assert result.failure_reason in step.error_message
+
+    finally:
+        db.close()
+
+
+def test_typed_decision_evidence_cannot_bypass_persisted_risk_facts():
+    """即使 typed 判定中的金额与阈值被改低，门禁仍以执行时数据库事实为准。"""
+    db = SessionLocal()
+    try:
+        run = _create_run(db, "risk-gate-forged-001", HIGH_VALUE_TICKET_KEY)
+        decision = _eligible_decision(db, HIGH_VALUE_ORDER_KEY)
+
+        stale = decision.model_copy(deep=True)
+        stale.evidence.order.amount = Decimal("1.00")
+        stale.evidence.policy.approval_required_above_amount = Decimal("9999.00")
+        stale.policy_approval_threshold_exceeded = False
+
+        result = create_replacement(
+            db,
+            run,
+            _request(HIGH_VALUE_ORDER_KEY),
+            stale,
+        )
+
+        assert result.status is CreateReplacementStatus.APPROVAL_REQUIRED
+        assert result.risk is not None
+        assert result.risk.order_amount == Decimal("1299.00")
+        assert result.risk.approval_threshold_amount == Decimal("500.00")
+        assert _persisted_replacements(db, HIGH_VALUE_ORDER_KEY) == []
     finally:
         db.close()
 

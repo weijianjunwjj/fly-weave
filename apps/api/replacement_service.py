@@ -18,8 +18,9 @@
 判定与执行之间订单可能被取消、库存可能被清零。判定负责"依据证据是否有资格"，
 本服务负责"此刻是否真的可以执行"，两者都必须通过。
 
-不在本任务范围内：工单写回（T017）、审批闸门与审批流程（T019 / T020）、
-库存扣减（当前 domain 没有库存预留 / 出库概念，不预先编造）。
+不在本任务范围内：工单写回（T017）、审批请求与审批流程（T020 及后续）、
+库存扣减（当前 domain 没有库存预留 / 出库概念，不预先编造）。T019 风险闸门
+属于本 mutation boundary，且必须在 ``ReplacementOrder`` 写入之前执行。
 """
 from datetime import datetime
 
@@ -45,6 +46,8 @@ from replacements import (
     CreateReplacementStatus,
     ReplacementRecord,
 )
+from risk import RiskAssessment
+from risk_service import assess_replacement_risk
 
 # create_replacement 在 Golden Path 中的步骤序号。intent=1、inventory=4 已被
 # 占用，2 / 3 / 5 分别为后续 policy / order / decision 步骤保留。
@@ -75,7 +78,7 @@ def create_replacement(
     if isinstance(outcome, CreateReplacementResult):
         return _finish(db, agent_run, outcome)
 
-    order, ticket, inventory_item = outcome
+    order, ticket, inventory_item, risk = outcome
     replacement = ReplacementOrder(
         business_key=f"{REPLACEMENT_KEY_PREFIX}{order.business_key}",
         order_id=order.id,
@@ -100,6 +103,7 @@ def create_replacement(
     result = CreateReplacementResult(
         status=CreateReplacementStatus.CREATED,
         replacement=_record_view(replacement, order, ticket, agent_run),
+        risk=risk,
     )
     return _finish(db, agent_run, result)
 
@@ -112,8 +116,10 @@ def _validate_preconditions(
 ):
     """逐条校验前置条件。
 
-    全部通过时返回 ``(order, ticket, inventory_item)`` 三个真实持久化实体，
-    供调用方直接建立业务关联；任何一条不满足则返回结构化失败结果。
+    全部通过时返回 ``(order, ticket, inventory_item, risk)`` 三个真实持久化
+    实体外加风险门禁的判断结果，供调用方直接建立业务关联；任何一条前置条件不
+    满足则返回结构化失败结果。风险门禁是最后一道校验：它只在受保护动作真正
+    写入之前求值，命中即返回等待审批，绝不落到 ``db.add``。
     """
     # --- 1. 输入必须是已验证的 typed 请求 ---
     if not isinstance(request, CreateReplacementRequest):
@@ -222,7 +228,19 @@ def _validate_preconditions(
     if existing is not None:
         return _duplicate(existing, order.business_key)
 
-    return order, ticket, inventory_item
+    # --- 9. 风险门禁（T019）：受保护动作真正写入之前的最后一道校验 ---
+    # 无论调用方从 HTTP 端点还是直接调用本服务进入，都必经此处；命中即返回
+    # 等待审批，绝不执行后续的 db.add。因此不存在可以绕过 gate 的旁路入口。
+    risk = assess_replacement_risk(db, decision, order)
+    if risk is None:
+        return _failure(
+            CreateReplacementStatus.EVIDENCE_MISMATCH,
+            "风险门禁无法从持久化状态取回判定引用的售后政策，拒绝执行换货",
+        )
+    if risk.requires_approval:
+        return _approval_required(risk)
+
+    return order, ticket, inventory_item, risk
 
 
 def _find_existing_replacement(
@@ -295,6 +313,20 @@ def _failure(
     return CreateReplacementResult(status=status, failure_reason=reason)
 
 
+def _approval_required(risk: RiskAssessment) -> CreateReplacementResult:
+    """把风险门禁的命中结果表示为等待人工审批。
+
+    这不是失败：前置条件全部通过，只是受保护动作被风险规则拦下，换货没有发生。
+    ``failure_reason`` 直接复用风险判断的可展示原因，使这个结果能独立地解释
+    "为什么停在这里"，而不需要调用方再去看 risk 字段。
+    """
+    return CreateReplacementResult(
+        status=CreateReplacementStatus.APPROVAL_REQUIRED,
+        failure_reason=risk.reason,
+        risk=risk,
+    )
+
+
 def _record_view(
     replacement: ReplacementOrder,
     order: Order,
@@ -326,12 +358,19 @@ def _finish(
     """
     _mark_run_started(agent_run)
     step = _get_or_create_replacement_step(db, agent_run)
-    step.completed_at = datetime.utcnow()
 
     if result.status is CreateReplacementStatus.CREATED:
+        step.completed_at = datetime.utcnow()
         step.status = AgentStepStatus.COMPLETED
         step.error_message = None
+    elif result.status is CreateReplacementStatus.APPROVAL_REQUIRED:
+        # 受保护动作被风险门禁拦下，既没成功也没失败，只暂停等待人工审批。
+        # 步骤保持 pending 并如实记录风险原因，completed_at 保持为空：它没有完成。
+        step.status = AgentStepStatus.PENDING
+        step.completed_at = None
+        step.error_message = _format_failure_message(result)
     else:
+        step.completed_at = datetime.utcnow()
         step.status = AgentStepStatus.FAILED
         step.error_message = _format_failure_message(result)
 
@@ -373,7 +412,11 @@ def _get_or_create_replacement_step(db: Session, agent_run: AgentRun) -> AgentSt
 
 
 def _format_failure_message(result: CreateReplacementResult) -> str:
-    """把失败结果编码成可检查的结构化失败原因，写入 AgentStep.error_message。"""
+    """把失败结果编码成可检查的结构化失败原因，写入 AgentStep.error_message。
+
+    "等待审批"也走这里，但它不是失败：``status=approval_required`` 已经说明了
+    语义，``reason`` 直接携带风险门禁给出的可展示原因。
+    """
     parts = [f"status={result.status.value}"]
     if result.existing_replacement_key:
         parts.append(f"existing={result.existing_replacement_key}")

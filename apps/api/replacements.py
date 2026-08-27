@@ -23,6 +23,7 @@ from enum import Enum
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from models import ReplacementStatus
+from risk import RiskAssessment
 
 
 class CreateReplacementStatus(str, Enum):
@@ -31,6 +32,9 @@ class CreateReplacementStatus(str, Enum):
     成功只有一种，失败按"为什么不能执行"显式分列，绝不折叠成一个笼统的 error：
 
     - ``CREATED``：全部前置条件通过，换货单已真实写入数据库；
+    - ``APPROVAL_REQUIRED``：命中 T019 的确定性风险规则，受保护动作在写入之前
+      被拦下，等待人工审批。它既不是成功也不是失败：换货没有发生，但也没有任何
+      前置条件不满足；
     - ``DUPLICATE``：该订单 / 该次 Run 已经执行过换货，本次被安全拒绝，
       不产生第二张换货单；
     - ``NOT_ELIGIBLE``：T015 的判定不是 eligible（blocked / ambiguous），
@@ -45,6 +49,7 @@ class CreateReplacementStatus(str, Enum):
     """
 
     CREATED = "created"
+    APPROVAL_REQUIRED = "approval_required"
     DUPLICATE = "duplicate"
     NOT_ELIGIBLE = "not_eligible"
     EVIDENCE_MISMATCH = "evidence_mismatch"
@@ -111,19 +116,25 @@ class ReplacementRecord(BaseModel):
 class CreateReplacementResult(BaseModel):
     """create_replacement 结果：成功携带真实换货单，失败只携带结构化原因。
 
-    ``model_validator`` 强制三条互斥规则，使伪成功在应用内部也无法构造：
+    ``model_validator`` 强制互斥规则，使伪成功在应用内部也无法构造：
 
     1. ``CREATED`` 必须携带 ``replacement``，且不得携带失败原因；
     2. 任何非 ``CREATED`` 一律不得携带 ``replacement``，且必须给出失败原因——
        失败无法伪装成"半成功"；
     3. ``DUPLICATE`` 必须指出已存在的换货单标识，其余状态不得携带该字段，
-       因此"重复"永远是有据可查的事实，而不是一句托辞。
+       因此"重复"永远是有据可查的事实，而不是一句托辞；
+    4. ``APPROVAL_REQUIRED`` 必须携带命中审批的风险判断 ``risk``，且该判断的
+       ``requires_approval`` 必须为真；其余状态不得携带"需要审批"的风险判断，
+       因此"高风险却照样执行"在契约层就无法表达。
     """
 
     status: CreateReplacementStatus
     replacement: ReplacementRecord | None = None
     existing_replacement_key: str | None = None
     failure_reason: str | None = None
+    # T019：本次执行经过风险门禁后的判断结果。命中审批时为"需要审批"，成功时
+    # 为"未命中"；失败路径（前置条件不满足）不携带，因为它没有走到风险门禁。
+    risk: RiskAssessment | None = None
 
     @model_validator(mode="after")
     def _validate_status_and_payload_are_exclusive(self) -> "CreateReplacementResult":
@@ -143,4 +154,18 @@ class CreateReplacementResult(BaseModel):
                 raise ValueError("duplicate 结果必须指出已存在的换货单标识")
         elif self.existing_replacement_key is not None:
             raise ValueError("只有 duplicate 结果才可携带已存在的换货单标识")
+
+        self._validate_risk_matches_status()
         return self
+
+    def _validate_risk_matches_status(self) -> None:
+        """风险字段必须与状态一致：只有 approval_required 能携带"需要审批"。"""
+        if self.status is CreateReplacementStatus.APPROVAL_REQUIRED:
+            if self.risk is None:
+                raise ValueError("approval_required 结果必须携带风险判断")
+            if not self.risk.requires_approval:
+                raise ValueError("approval_required 结果的风险判断必须要求审批")
+        elif self.risk is not None and self.risk.requires_approval:
+            raise ValueError(
+                f"状态 {self.status.value} 不得携带要求审批的风险判断"
+            )

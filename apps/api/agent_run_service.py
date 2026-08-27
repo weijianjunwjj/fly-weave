@@ -24,9 +24,12 @@
 3. **成功不由本模块宣布。** ``AgentRun`` 进入 ``COMPLETED`` 的唯一入口仍然是
    ``ticket_service``，且只在工单真的被回写之后。本模块只会把 Run 置为 FAILED。
 
-不在本任务范围内：审批闸门、人工确认、风险分级（T019 / T020）。
-``ReplacementDecision.policy_approval_threshold_exceeded`` 在这里被原样携带但
-不参与任何控制流，本模块不因它暂停、分流或拒绝执行。
+不在本任务范围内：审批结果（approve / reject，T020）。T019 的确定性风险门禁由
+``replacement_service`` 在受保护动作真正写入之前执行，本模块只把它的命中结果
+原样映射为 ``WAITING_FOR_APPROVAL`` 暂停状态，不做任何自动放行或拒绝。
+``ReplacementDecision.policy_approval_threshold_exceeded`` 是 T015 携带的事实
+标记，风险门禁独立基于执行时持久化事实重新求值，本模块仍不因它暂停、分流或
+拒绝执行。
 """
 from datetime import datetime
 
@@ -258,6 +261,10 @@ def _execute(
         ),
         decision,
     )
+    if replacement_result.status is CreateReplacementStatus.APPROVAL_REQUIRED:
+        # T019 风险门禁命中：受保护动作被拦下，Run 进入等待人工审批而不是失败。
+        # 本模块不实现 approve / reject，因此 Run 就停在这个暂停状态。
+        return _await_approval(db, agent_run)
     if (
         replacement_result.status is not CreateReplacementStatus.CREATED
         or replacement_result.replacement is None
@@ -400,6 +407,25 @@ def _fail_run(db: Session, agent_run: AgentRun, error_message: str) -> AgentRun:
     agent_run.status = AgentRunStatus.FAILED
     agent_run.completed_at = datetime.utcnow()
     agent_run.error_message = error_message
+    db.commit()
+    db.refresh(agent_run)
+    return agent_run
+
+
+def _await_approval(db: Session, agent_run: AgentRun) -> AgentRun:
+    """把 Run 置为等待人工审批的暂停终态（T019 风险门禁命中）。
+
+    这是"受保护动作被确定性风险规则拦下"之后的诚实状态：Run 没有失败（没有任何
+    前置条件不满足），也没有完成（换货没有发生、工单没有回写）。它停在
+    ``WAITING_FOR_APPROVAL``，等待后续的 approve / reject 流程 —— 而 approve /
+    reject 不在本任务范围内，因此本模块不会继续推进它。
+
+    风险原因本身已由 ``replacement_service`` 写入该 Run 的换货步骤；Run 的
+    ``error_message`` 保持为空，因为它不是失败。
+    """
+    agent_run.status = AgentRunStatus.WAITING_FOR_APPROVAL
+    agent_run.completed_at = None
+    agent_run.error_message = None
     db.commit()
     db.refresh(agent_run)
     return agent_run

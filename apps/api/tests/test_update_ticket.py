@@ -383,9 +383,23 @@ def test_replacement_from_another_ticket_cannot_close_this_ticket():
     """拿别的工单的换货单来结本工单，属于关联无效"""
     db = SessionLocal()
     try:
-        # 换货单真实存在，但它属于高金额工单
-        other_run = _create_run(db, "cross-ticket-001", HIGH_VALUE_TICKET_KEY)
-        replacement_key = _real_replacement(db, other_run, HIGH_VALUE_ORDER_KEY)
+        # 为同一个低风险订单创建另一张测试工单，使换货单能通过真实 T016 路径
+        # 产生，同时仍明确属于另一张工单。高金额种子必须继续被 T019 拦截。
+        source_ticket = _ticket(db, LOW_RISK_TICKET_KEY)
+        other_ticket = Ticket(
+            business_key="ticket-test-cross-ticket",
+            customer_id=source_ticket.customer_id,
+            order_id=source_ticket.order_id,
+            subject="测试跨工单换货单归属",
+            description="仅用于验证换货单不能被另一张工单认领",
+            status=TicketStatus.OPEN,
+            is_demo_data=True,
+        )
+        db.add(other_ticket)
+        db.commit()
+
+        other_run = _create_run(db, "cross-ticket-001", other_ticket.business_key)
+        replacement_key = _real_replacement(db, other_run, LOW_RISK_ORDER_KEY)
 
         run = _create_run(db, "cross-ticket-002", LOW_RISK_TICKET_KEY)
         result = update_ticket(db, run, _request(replacement_key=replacement_key))

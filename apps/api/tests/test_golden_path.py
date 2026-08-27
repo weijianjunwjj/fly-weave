@@ -46,6 +46,10 @@ LOW_RISK_TICKET_KEY = "ticket-demo-001"
 LOW_RISK_ORDER_KEY = "order-demo-001"
 AVAILABLE_SKU = "SKU-EARBUD-PRO-01"
 
+# 高金额场景：业务条件 eligible，但金额超过政策人工审批阈值
+HIGH_VALUE_TICKET_KEY = "ticket-demo-002"
+HIGH_VALUE_ORDER_KEY = "order-demo-002"
+
 # 拒绝场景：购买已 60 天且商品无货，判定必然 blocked
 REJECTED_TICKET_KEY = "ticket-demo-003"
 REJECTED_ORDER_KEY = "order-demo-003"
@@ -72,6 +76,7 @@ def _seed() -> None:
         seed_demo_data(db)
     finally:
         db.close()
+
 
 
 def _run(ticket_key: str) -> str:
@@ -186,6 +191,77 @@ def test_successful_run_writes_the_final_ticket_result():
     finally:
         db.close()
 
+
+# --------------------------------------------------------------------------
+# 风险门禁：高风险动作暂停等待审批
+# --------------------------------------------------------------------------
+
+
+def test_high_value_case_waits_for_approval_without_business_side_effects():
+    """高金额 eligible 案例被风险门禁暂停，不创建换货单，也不回写工单。"""
+    run_key = _run(HIGH_VALUE_TICKET_KEY)
+
+    db = SessionLocal()
+    try:
+        agent_run = (
+            db.query(AgentRun)
+            .filter(AgentRun.business_key == run_key)
+            .one()
+        )
+
+        # Run 没有失败，也绝不能伪装成完成。
+        assert agent_run.status is AgentRunStatus.WAITING_FOR_APPROVAL
+        assert agent_run.started_at is not None
+        assert agent_run.completed_at is None
+        assert agent_run.error_message is None
+        assert agent_run.ticket.business_key == HIGH_VALUE_TICKET_KEY
+
+        steps = {step.name: step for step in agent_run.steps}
+
+        # 风险门禁之前的真实步骤已经完成。
+        assert REPLACEMENT_STEP_NAME in steps
+
+        replacement_step = steps[REPLACEMENT_STEP_NAME]
+
+        # create_replacement 被拦截：
+        # 这个步骤既没有完成，也没有失败，而是保持 pending。
+        assert replacement_step.status is AgentStepStatus.PENDING
+        assert replacement_step.completed_at is None
+        assert replacement_step.error_message is not None
+        assert "approval_required" in replacement_step.error_message
+
+        # 受保护动作没有成功，因此最终工单回写步骤绝不能启动。
+        assert UPDATE_TICKET_STEP_NAME not in steps
+
+        order = (
+            db.query(Order)
+            .filter(Order.business_key == HIGH_VALUE_ORDER_KEY)
+            .one()
+        )
+
+        # 真正的安全边界：
+        # 数据库中没有任何换货单副作用。
+        assert (
+            db.query(ReplacementOrder)
+            .filter(ReplacementOrder.order_id == order.id)
+            .one_or_none()
+            is None
+        )
+
+        ticket = (
+            db.query(Ticket)
+            .filter(Ticket.business_key == HIGH_VALUE_TICKET_KEY)
+            .one()
+        )
+
+        # 工单仍保持原始状态，没有被 update_ticket 伪造为解决。
+        assert ticket.status is TicketStatus.OPEN
+        assert ticket.resolution is None
+        assert ticket.resolved_at is None
+        assert ticket.replacement_id is None
+
+    finally:
+        db.close()
 
 # --------------------------------------------------------------------------
 # Tool 失败不得被误报为成功
@@ -410,3 +486,87 @@ def test_latest_endpoint_reports_only_real_runs():
     assert latest.status_code == 200
     assert latest.json()["business_key"] == started.json()["business_key"]
     assert latest.json()["status"] == "completed"
+
+def test_start_endpoint_reports_high_risk_as_waiting_for_approval():
+    """高风险 Golden Path 的 HTTP 响应必须诚实展示等待审批和结构化风险原因。"""
+    response = client.post(
+        f"/tickets/{HIGH_VALUE_TICKET_KEY}/agent-runs"
+    )
+
+    # HTTP 请求本身成功完成。
+    # 201 不意味着业务动作已经执行成功。
+    assert response.status_code == 201
+
+    payload = response.json()
+
+    assert payload["ticket_key"] == HIGH_VALUE_TICKET_KEY
+    assert payload["status"] == "waiting_for_approval"
+    assert payload["error_message"] is None
+
+    # 风险门禁已经阻止换货单真正产生。
+    assert payload["replacement"] is None
+
+    # T019 必须把结构化风险原因交给 UI，
+    # UI 不允许自行重新推导金额规则。
+    assert payload["risk"] is not None
+
+    risk = payload["risk"]
+
+    assert risk["action"] == "create_replacement"
+    assert risk["level"] == "high"
+    assert (
+        risk["rule_code"]
+        == "order_amount_above_approval_threshold"
+    )
+    assert risk["requires_approval"] is True
+    assert risk["reason"]
+
+    assert risk["order_key"] == HIGH_VALUE_ORDER_KEY
+    assert risk["order_amount"] is not None
+    assert risk["approval_threshold_amount"] is not None
+    assert risk["policy_key"] is not None
+
+    # 工单没有进入最终成功结果。
+    assert payload["ticket_result"]["status"] == "open"
+    assert payload["ticket_result"]["resolution"] is None
+    assert payload["ticket_result"]["replacement_key"] is None
+
+    steps = {
+        step["name"]: step
+        for step in payload["steps"]
+    }
+
+    assert REPLACEMENT_STEP_NAME in steps
+
+    replacement_step = steps[REPLACEMENT_STEP_NAME]
+    assert replacement_step["status"] == "pending"
+    assert replacement_step["completed_at"] is None
+    assert replacement_step["error_message"] is not None
+    assert "approval_required" in replacement_step["error_message"]
+
+    # 风险门禁命中后不得继续执行 update_ticket。
+    assert UPDATE_TICKET_STEP_NAME not in steps
+
+    # API 返回的 waiting_for_approval
+    # 必须与数据库中的真实 Run 状态完全一致。
+    assert (
+        _persisted_run_status(payload["business_key"])
+        is AgentRunStatus.WAITING_FOR_APPROVAL
+    )
+
+    db = SessionLocal()
+    try:
+        order = (
+            db.query(Order)
+            .filter(Order.business_key == HIGH_VALUE_ORDER_KEY)
+            .one()
+        )
+
+        assert (
+            db.query(ReplacementOrder)
+            .filter(ReplacementOrder.order_id == order.id)
+            .one_or_none()
+            is None
+        )
+    finally:
+        db.close()
