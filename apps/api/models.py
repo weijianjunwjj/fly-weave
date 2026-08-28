@@ -3,20 +3,25 @@ from enum import Enum as PyEnum
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Enum,
     Float,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import relationship
 
+from approvals import ApprovalRequestStatus
 from database import Base
+from risk import ProtectedAction, RiskLevel, RiskRuleCode
 
 
 class TicketStatus(PyEnum):
@@ -269,6 +274,14 @@ class AgentRun(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+    # T020：受保护动作被风险门禁拦下时产生的审批请求。按动作维度可以有多条，
+    # 但同一动作至多一条处于 pending（由数据库级 partial unique index 保证）。
+    approval_requests = relationship(
+        "ApprovalRequest",
+        back_populates="agent_run",
+        order_by="ApprovalRequest.id",
+        cascade="all, delete-orphan",
+    )
 
 
 class AgentStep(Base):
@@ -428,3 +441,116 @@ class ReplacementOrder(Base):
     # 与 Ticket.resolution_replacement 构成两个方向的引用，显式指定本侧外键消歧
     ticket = relationship("Ticket", foreign_keys=[ticket_id])
     agent_run = relationship("AgentRun", back_populates="replacement")
+
+
+class ApprovalRequest(Base):
+    """
+    人工审批请求：受保护动作被确定性风险门禁拦下这一事实的权威持久化（T020）。
+
+    与 ``AgentStep.error_message`` 里的一段说明文字不同，这是一个**独立的业务
+    实体**：它明确回答"哪个 Agent Run 的哪个受保护动作，因为什么风险事实正在
+    等待人工审批"。等待审批既不是失败也不是完成，因此它有自己的状态枚举，
+    不复用 ``AgentStepStatus`` / ``AgentRunStatus``。
+
+    风险依据以 **snapshot** 形式落库，而不是保留一个日后重新计算的入口。九个
+    ``risk_*`` 与 ``reason`` 字段共同复刻 ``RiskAssessment`` 在规则真正触发那
+    一刻的全部结构化内容：即使售后政策的审批阈值日后被改动，一条已经存在的
+    pending 审批请求仍然准确说得出"当时为什么被拦截"。这与 T019 的执行闸门
+    互不冲突 —— 闸门永远读当前事实，快照永远是历史事实。
+
+    与 AgentIntent / AgentInventoryCheck 一致，快照以类型化列（而非自由 JSON）
+    落库，因此每一项依据都可被数据库直接查询与约束。
+
+    重复由数据库层阻止，而非进程内状态：``agent_run_id + protected_action`` 上
+    有一条 **partial unique index**（仅约束 ``status = 'pending'`` 的行），使
+    "同一次 Run 的同一个受保护动作出现两条待审批请求"在并发下也无法成立，同时
+    不妨碍日后 approve / reject 之后再次进入审批。
+
+    ``agent_run_id`` 使用 ON DELETE CASCADE，与 Run 的其余关联记录一致，使
+    demo 数据重置保持可重复；外键本身则使"无法追溯 Agent Run 的孤立审批请求"
+    在数据库层不可能存在。
+    """
+    __tablename__ = "approval_requests"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # 由 Run 业务标识与受保护动作确定性派生（approval-<run_key>-<action>），
+    # 因此同一次 Run 同一动作的审批标识稳定可预期，与 partial unique index
+    # 表达的是同一条业务规则。列宽 = 前缀 9 + AgentRun.business_key 64 +
+    # 分隔符 1 + 动作取值，留足余量取 128。
+    business_key = Column(String(128), unique=True, nullable=False, index=True)
+    agent_run_id = Column(
+        Integer,
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # 复用 T019 的受保护动作枚举，使审批对象与风险门禁说的是同一件事
+    protected_action = Column(
+        Enum(
+            ProtectedAction,
+            name="protectedaction",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        nullable=False,
+    )
+    status = Column(
+        Enum(
+            ApprovalRequestStatus,
+            name="approvalrequeststatus",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        nullable=False,
+        default=ApprovalRequestStatus.PENDING,
+    )
+
+    # --- 风险触发那一刻的 snapshot ---
+    # 全部非空的部分由 T019 契约保证：要求人工审批的判断必须携带完整规则依据。
+    risk_level = Column(
+        Enum(
+            RiskLevel,
+            name="risklevel",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        nullable=False,
+    )
+    risk_rule_code = Column(
+        Enum(
+            RiskRuleCode,
+            name="riskrulecode",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        nullable=False,
+    )
+    risk_requires_approval = Column(Boolean, nullable=False)
+    # 风险判断的可展示原因，UI 原样呈现即可，不需要重新推导规则
+    reason = Column(Text, nullable=False)
+    risk_order_key = Column(String(64), nullable=True)
+    risk_order_amount = Column(Numeric(10, 2), nullable=True)
+    risk_approval_threshold_amount = Column(Numeric(10, 2), nullable=True)
+    risk_policy_key = Column(String(64), nullable=True)
+
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    # 审批尚未有结果时保持 NULL，不用占位时间伪造审批事实。T020 只产生 pending，
+    # 因此本列在当前流程中恒为 NULL；CHECK 约束使"pending 却已有审批完成时间"
+    # 在数据库层就不可能成立。
+    resolved_at = Column(DateTime, nullable=True)
+
+    agent_run = relationship("AgentRun", back_populates="approval_requests")
+
+    __table_args__ = (
+        # 同一次 Run 的同一个受保护动作至多一条 pending 审批请求。只约束 pending
+        # 行，因此日后 approve / reject 之后仍可再次进入审批而不被这条索引挡住。
+        Index(
+            "uq_approval_requests_pending_run_action",
+            "agent_run_id",
+            "protected_action",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+        ),
+        # pending 意味着审批尚未有结果，因此绝不能带审批完成时间。这条规则由
+        # 数据库执行，应用层写错也无法提交。
+        CheckConstraint(
+            "status <> 'pending' OR resolved_at IS NULL",
+            name="ck_approval_requests_pending_not_resolved",
+        ),
+    )

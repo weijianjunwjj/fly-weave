@@ -27,6 +27,7 @@ from datetime import datetime
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from approval_service import create_or_get_pending_approval
 from decision_service import REPLACEABLE_ORDER_STATUSES
 from decisions import ReplacementDecision, ReplacementDecisionStatus
 from models import (
@@ -369,6 +370,8 @@ def _finish(
         step.status = AgentStepStatus.PENDING
         step.completed_at = None
         step.error_message = _format_failure_message(result)
+        # T020：审批请求与 Run 的等待审批状态必须一起落库，见下方说明
+        _enter_waiting_for_approval(db, agent_run, result.risk)
     else:
         step.completed_at = datetime.utcnow()
         step.status = AgentStepStatus.FAILED
@@ -376,6 +379,30 @@ def _finish(
 
     db.commit()
     return result
+
+
+def _enter_waiting_for_approval(
+    db: Session, agent_run: AgentRun, risk: RiskAssessment
+) -> None:
+    """创建 pending 审批请求，并把 Run 置为等待人工审批（T020）。
+
+    两件事必须一起成立，因此刻意放在同一个函数、同一个事务里：调用方随后的
+    ``db.commit()`` 要么让"审批请求存在 **且** Run 在等待审批"同时生效，要么
+    两者都不生效。数据库里不会出现"Run 在等审批却查不到审批请求"，也不会出现
+    "审批请求已建立却让 Run 走向 completed"。
+
+    审批请求的创建是幂等的：同一次 Run 的同一个受保护动作重复进入这里，只会
+    得到同一条 pending 记录。
+
+    注意执行顺序：审批请求先写入，Run 状态后置位。命中风险时 ``risk`` 由
+    ``CreateReplacementResult`` 的契约保证非空且 ``requires_approval`` 为真，
+    因此这里不需要、也不应该重新求值风险。
+    """
+    create_or_get_pending_approval(db, agent_run, risk)
+    agent_run.status = AgentRunStatus.WAITING_FOR_APPROVAL
+    # 等待审批不是结束：没有完成时间，也没有失败原因
+    agent_run.completed_at = None
+    agent_run.error_message = None
 
 
 def _mark_run_started(agent_run: AgentRun) -> None:

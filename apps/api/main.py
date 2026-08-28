@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
 from agent_run_service import run_golden_path
+from approval_service import approval_record, get_pending_approval
 from config import settings
 from database import get_db
 from models import AgentRun, AgentRunStatus, Ticket
@@ -206,6 +207,25 @@ class AgentRunRiskResponse(BaseModel):
     policy_key: str | None
 
 
+class AgentRunApprovalRequestResponse(BaseModel):
+    """等待人工审批时那条真实落库的审批请求（T020）。
+
+    这是"为什么停在这里"的权威来源：``risk`` 直接来自审批请求创建时保存的
+    快照，因此 UI 不需要、也不应该再去重算当前政策来还原历史原因。售后政策
+    阈值日后被改动，这里展示的拦截原因也不会跟着变。
+
+    只暴露稳定的业务标识与快照内容，不含自增主键或任何 ORM 内部字段。
+    """
+    approval_key: str
+    status: str
+    protected_action: str
+    created_at: datetime
+    # pending 审批尚未有结果，因此该字段恒为 null，不用占位时间伪造审批事实
+    resolved_at: datetime | None
+    # 风险规则触发那一刻的快照，不是此刻重算的结论
+    risk: AgentRunRiskResponse
+
+
 class AgentRunResponse(BaseModel):
     """一次 Agent Run 的真实执行结果。
 
@@ -226,19 +246,17 @@ class AgentRunResponse(BaseModel):
     replacement: AgentRunReplacementResponse | None
     ticket_result: AgentRunTicketResultResponse
     risk: AgentRunRiskResponse | None
+    # T020：等待人工审批时那条真实落库的审批请求。它是审批语义的权威来源；
+    # 未被风险门禁拦下的 Run 没有审批请求，此处为 null。
+    approval_request: AgentRunApprovalRequestResponse | None
 
 
-def _risk_response(db: Session, agent_run: AgentRun) -> AgentRunRiskResponse | None:
-    """从持久化状态重新求值风险判断，供等待审批的 Run 把原因展示给 UI。
+def _risk_view(risk) -> AgentRunRiskResponse:
+    """把一次风险判断（当场求值的结果或持久化快照）映射为响应模型。
 
-    只在 Run 停在等待审批时返回：这是风险门禁真正拦下动作的场景。其余状态的
-    Run 不携带 ``risk``，避免把"没有拦下"误读成一次风险判断。
+    ``RiskAssessment`` 与 ``RiskSnapshot`` 的字段一一对应，因此两者共用同一个
+    映射，UI 拿到的结构始终一致。金额以字符串返回，避免浮点精度损失。
     """
-    if agent_run.status is not AgentRunStatus.WAITING_FOR_APPROVAL:
-        return None
-    risk = assess_persisted_replacement_risk(db, agent_run)
-    if risk is None:
-        return None
     return AgentRunRiskResponse(
         action=risk.action.value,
         level=risk.level.value,
@@ -256,11 +274,59 @@ def _risk_response(db: Session, agent_run: AgentRun) -> AgentRunRiskResponse | N
     )
 
 
+def _approval_request_response(
+    db: Session, agent_run: AgentRun
+) -> AgentRunApprovalRequestResponse | None:
+    """取回该 Run 待处理的审批请求，并以其持久化快照作答。
+
+    ``approval_record`` 只读取落库的快照列，不查询当前 Order / AfterSalesPolicy，
+    也不调用任何风险规则求值 —— 展示的是触发时刻的历史事实。
+    """
+    approval = get_pending_approval(db, agent_run)
+    if approval is None:
+        return None
+    record = approval_record(approval)
+    return AgentRunApprovalRequestResponse(
+        approval_key=record.approval_key,
+        status=record.status.value,
+        protected_action=record.protected_action.value,
+        created_at=record.created_at,
+        resolved_at=record.resolved_at,
+        risk=_risk_view(record.risk),
+    )
+
+
+def _risk_response(
+    db: Session,
+    agent_run: AgentRun,
+    approval: AgentRunApprovalRequestResponse | None,
+) -> AgentRunRiskResponse | None:
+    """把风险原因交给 UI，优先使用审批请求保存的历史快照。
+
+    数据源有明确优先级：只要存在待审批请求，就以它创建时的快照为准，绝不用
+    当前政策的重算结果冒充历史事实。只有在 Run 停在等待审批却查不到审批请求
+    这种历史遗留情形下，才退回按持久化状态重新求值 —— 那时如实展示的是"此刻
+    重算的结论"，而不是伪造的当时依据。
+
+    只在 Run 停在等待审批时返回：这是风险门禁真正拦下动作的场景。其余状态的
+    Run 不携带 ``risk``，避免把"没有拦下"误读成一次风险判断。
+    """
+    if agent_run.status is not AgentRunStatus.WAITING_FOR_APPROVAL:
+        return None
+    if approval is not None:
+        return approval.risk
+    risk = assess_persisted_replacement_risk(db, agent_run)
+    if risk is None:
+        return None
+    return _risk_view(risk)
+
+
 def _agent_run_response(db: Session, agent_run: AgentRun) -> AgentRunResponse:
     """把已持久化的 Run 映射为响应模型，不做任何状态推断或补齐"""
     ticket = agent_run.ticket
     replacement = agent_run.replacement
     resolution_replacement = ticket.resolution_replacement
+    approval_request = _approval_request_response(db, agent_run)
 
     return AgentRunResponse(
         business_key=agent_run.business_key,
@@ -270,7 +336,8 @@ def _agent_run_response(db: Session, agent_run: AgentRun) -> AgentRunResponse:
         started_at=agent_run.started_at,
         completed_at=agent_run.completed_at,
         error_message=agent_run.error_message,
-        risk=_risk_response(db, agent_run),
+        approval_request=approval_request,
+        risk=_risk_response(db, agent_run, approval_request),
         # 关系上已按 step_order 排序，时间线顺序即真实执行顺序
         steps=[
             AgentStepResponse(

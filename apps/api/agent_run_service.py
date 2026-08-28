@@ -420,8 +420,10 @@ def _await_approval(db: Session, agent_run: AgentRun) -> AgentRun:
     ``WAITING_FOR_APPROVAL``，等待后续的 approve / reject 流程 —— 而 approve /
     reject 不在本任务范围内，因此本模块不会继续推进它。
 
-    风险原因本身已由 ``replacement_service`` 写入该 Run 的换货步骤；Run 的
-    ``error_message`` 保持为空，因为它不是失败。
+    风险原因本身已由 ``replacement_service`` 写入该 Run 的换货步骤；T020 的
+    ``ApprovalRequest`` 也在 ``replacement_service`` 的同一事务里与 waiting 状态
+    一起建立，因此这里只是再次把 Run 稳定在等待审批，不会出现"等审批却没有审批
+    请求"的可提交状态。Run 的 ``error_message`` 保持为空，因为它不是失败。
     """
     agent_run.status = AgentRunStatus.WAITING_FOR_APPROVAL
     agent_run.completed_at = None
