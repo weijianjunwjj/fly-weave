@@ -6,7 +6,14 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
 from agent_run_service import run_golden_path
+from approval_decision_service import (
+    ApprovalConflictError,
+    ApprovalRequestNotFoundError,
+    approve,
+    reject,
+)
 from approval_service import approval_record, get_pending_approval
+from approvals import ApprovalRequestStatus
 from config import settings
 from database import get_db
 from models import AgentRun, AgentRunStatus, Ticket
@@ -226,6 +233,34 @@ class AgentRunApprovalRequestResponse(BaseModel):
     risk: AgentRunRiskResponse
 
 
+class ApprovalDecisionRequest(BaseModel):
+    """人工审批决策的可选请求体（T021）。
+
+    ``decision_reason`` 为空表示只做决策、不附带理由。它只在首次决策时被落库，
+    同决策重试不会覆盖既有理由。
+    """
+
+    decision_reason: str | None = None
+
+
+class ApprovalDecisionResponse(BaseModel):
+    """人工审批决策之后那条审批请求的真实持久化状态（T021）。
+
+    ``risk`` 仍是触发时刻保存的 snapshot，不是此刻重算的结论；``agent_run_status``
+    说明所属 Run 现在停在哪里 —— approve 后仍是 ``waiting_for_approval``（恢复
+    执行是 T022 的事），reject 后进入 ``cancelled`` 终止态。
+    """
+
+    approval_key: str
+    status: str
+    protected_action: str
+    agent_run_key: str
+    agent_run_status: str
+    resolved_at: datetime | None
+    decision_reason: str | None
+    risk: AgentRunRiskResponse
+
+
 class AgentRunResponse(BaseModel):
     """一次 Agent Run 的真实执行结果。
 
@@ -430,6 +465,83 @@ async def get_latest_agent_run(
             status_code=404, detail=f"工单 {business_key} 尚未执行过 Agent Run"
         )
     return _agent_run_response(db, agent_run)
+
+
+def _decision_reason(body: ApprovalDecisionRequest | None) -> str | None:
+    """取回可选决策理由；没有请求体等同于没有理由。"""
+    return body.decision_reason if body is not None else None
+
+
+def _approval_decision_response(
+    db: Session,
+    approval_key: str,
+    target: ApprovalRequestStatus,
+    decision_reason: str | None,
+) -> ApprovalDecisionResponse:
+    """执行一次一次性审批决策，并把它映射为真实持久化状态的响应。
+
+    404 / 409 直接在这里转换为 HTTP 语义：不存在是 404，相反决策是 409。决策
+    成功的 200 响应一律来自数据库里那条真实记录，而不是决策函数的返回值本身。
+    """
+    try:
+        if target is ApprovalRequestStatus.APPROVED:
+            approval = approve(db, approval_key, decision_reason)
+        else:
+            approval = reject(db, approval_key, decision_reason)
+    except ApprovalRequestNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ApprovalConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    record = approval_record(approval)
+    return ApprovalDecisionResponse(
+        approval_key=record.approval_key,
+        status=record.status.value,
+        protected_action=record.protected_action.value,
+        agent_run_key=record.agent_run_key,
+        agent_run_status=record.agent_run_status,
+        resolved_at=record.resolved_at,
+        decision_reason=record.decision_reason,
+        risk=_risk_view(record.risk),
+    )
+
+
+@app.post(
+    "/approval-requests/{approval_key}/approve",
+    response_model=ApprovalDecisionResponse,
+)
+async def approve_approval_request(
+    approval_key: str,
+    body: ApprovalDecisionRequest | None = None,
+    db: Session = Depends(get_db),
+) -> ApprovalDecisionResponse:
+    """批准一条 pending 审批请求（T021）。
+
+    只把审批请求记录为 APPROVED，不执行受保护动作、不更新工单、不恢复 Run，
+    也不把 Run 标 COMPLETED —— 恢复执行是 T022 的事。
+    """
+    return _approval_decision_response(
+        db, approval_key, ApprovalRequestStatus.APPROVED, _decision_reason(body)
+    )
+
+
+@app.post(
+    "/approval-requests/{approval_key}/reject",
+    response_model=ApprovalDecisionResponse,
+)
+async def reject_approval_request(
+    approval_key: str,
+    body: ApprovalDecisionRequest | None = None,
+    db: Session = Depends(get_db),
+) -> ApprovalDecisionResponse:
+    """拒绝一条 pending 审批请求（T021）。
+
+    把审批请求记录为 REJECTED，并让仍停在等待审批的 Run 转入 CANCELLED 终止态；
+    不产生换货单、不更新工单。
+    """
+    return _approval_decision_response(
+        db, approval_key, ApprovalRequestStatus.REJECTED, _decision_reason(body)
+    )
 
 
 if __name__ == "__main__":

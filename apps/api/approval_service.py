@@ -141,15 +141,23 @@ def approval_record(approval: ApprovalRequest) -> ApprovalRequestRecord:
     """把已持久化的审批请求映射为类型化视图。
 
     对外只暴露稳定的业务标识与快照内容，不暴露自增主键或任何 ORM 内部字段。
+    同时携带所属 Run 的当前持久化状态与审批决策理由（若已决策），使 T021 的
+    决策端点能一并回答"这次 Run 现在停在哪里"。
     """
     return ApprovalRequestRecord(
         approval_key=approval.business_key,
         status=approval.status,
         protected_action=approval.protected_action,
         agent_run_key=approval.agent_run.business_key,
+        agent_run_status=(
+            approval.agent_run.status.value
+            if approval.agent_run is not None
+            else None
+        ),
         risk=risk_snapshot_of(approval),
         created_at=approval.created_at,
         resolved_at=approval.resolved_at,
+        decision_reason=approval.decision_reason,
     )
 
 

@@ -17,9 +17,11 @@ T019 的确定性风险门禁只回答"这次执行是否必须先经过人工�
 3. **快照必须自洽。** ``RiskSnapshot`` 只接受 ``requires_approval`` 为真的风险
    判断，因此"用一个未命中风险的判断创建审批请求"在契约层就无法构造。
 
-不在本任务范围内：approve / reject、审批结果状态转换、审批后 Resume。本模块
-因此不定义任何审批**结果**的行为，``APPROVED`` / ``REJECTED`` 只作为未来
-schema 的稳定取值预留，T020 不产生也不消费它们。
+T020 只建立 pending 审批请求的持久化闭环，不实现 approve / reject 与审批后
+Resume —— 那些属于 T021 / T022。本模块因此不定义任何审批**决策**的行为：
+``APPROVED`` / ``REJECTED`` 作为 schema 的稳定取值预留，由 T021 的决策服务
+经数据库级 CAS 一次性产生；``ApprovalRequestRecord`` 仅如实映射一条已持久化
+审批请求（无论 pending 还是已决策）的当前状态与快照。
 """
 from datetime import datetime
 from decimal import Decimal
@@ -35,9 +37,10 @@ class ApprovalRequestStatus(str, Enum):
 
     T020 只真实支持 ``PENDING``：审批请求被创建，等待人工处理。
 
-    ``APPROVED`` / ``REJECTED`` 是为未来 schema 稳定预留的取值，当前没有任何
-    真实执行路径可以产生它们 —— T020 不实现 approve / reject，也不实现审批
-    结果的状态转换。它们在这里出现，只是为了让日后新增转换时不必迁移枚举类型。
+    ``APPROVED`` / ``REJECTED`` 是 T021 的审批结果状态：人工 approve / reject
+    通过数据库级 CAS 把 ``PENDING`` 一次性转换为二者之一，此后再也无法回到
+    pending，也不能在两者之间翻转。它们早在 T020 就已作为 schema 的稳定取值
+    预留，因此 T021 无需迁移枚举类型。
     """
 
     PENDING = "pending"
@@ -104,15 +107,20 @@ class ApprovalRequestRecord(BaseModel):
     请求"。
 
     ``resolved_at`` 对 pending 必须为空：审批尚未有结果，就不用占位时间伪造它。
+    ``agent_run_status`` 携带该审批请求所属 Run 的当前持久化状态，使决策端点在
+    返回审批请求时能一并说明"Run 现在停在哪里"（approve 后仍为等待审批，reject
+    后转入终止状态）。``decision_reason`` 只有审批已决策时才可能非空。
     """
 
     approval_key: str
     status: ApprovalRequestStatus
     protected_action: ProtectedAction
     agent_run_key: str
+    agent_run_status: str | None = None
     risk: RiskSnapshot
     created_at: datetime
     resolved_at: datetime | None = None
+    decision_reason: str | None = None
 
     @model_validator(mode="after")
     def _pending_must_not_be_resolved(self) -> "ApprovalRequestRecord":

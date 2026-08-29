@@ -534,6 +534,10 @@ class ApprovalRequest(Base):
     # 因此本列在当前流程中恒为 NULL；CHECK 约束使"pending 却已有审批完成时间"
     # 在数据库层就不可能成立。
     resolved_at = Column(DateTime, nullable=True)
+    # 人工审批决策的理由（T021）。可选：approve / reject 都可能不附带理由，此时
+    # 保持 NULL；一旦落库，同决策重试也不会刷新它。它与 resolved_at 一起构成
+    # "何时、由谁、以什么理由"的审计事实，但不引入用户 / 角色概念。
+    decision_reason = Column(Text, nullable=True)
 
     agent_run = relationship("AgentRun", back_populates="approval_requests")
 
