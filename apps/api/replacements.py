@@ -35,6 +35,8 @@ class CreateReplacementStatus(str, Enum):
     - ``APPROVAL_REQUIRED``：命中 T019 的确定性风险规则，受保护动作在写入之前
       被拦下，等待人工审批。它既不是成功也不是失败：换货没有发生，但也没有任何
       前置条件不满足；
+    - ``AUTHORIZATION_MISMATCH``：调用方提供了审批授权，但该授权与当前要执行的
+      受保护动作 / AgentRun / 业务上下文不精确匹配，fail closed，绝不执行；
     - ``DUPLICATE``：该订单 / 该次 Run 已经执行过换货，本次被安全拒绝，
       不产生第二张换货单；
     - ``NOT_ELIGIBLE``：T015 的判定不是 eligible（blocked / ambiguous），
@@ -50,6 +52,7 @@ class CreateReplacementStatus(str, Enum):
 
     CREATED = "created"
     APPROVAL_REQUIRED = "approval_required"
+    AUTHORIZATION_MISMATCH = "authorization_mismatch"
     DUPLICATE = "duplicate"
     NOT_ELIGIBLE = "not_eligible"
     EVIDENCE_MISMATCH = "evidence_mismatch"

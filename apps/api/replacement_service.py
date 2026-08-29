@@ -27,7 +27,7 @@ from datetime import datetime
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from approval_service import create_or_get_pending_approval
+from approval_service import approval_authorizes, create_or_get_pending_approval
 from decision_service import REPLACEABLE_ORDER_STATUSES
 from decisions import ReplacementDecision, ReplacementDecisionStatus
 from models import (
@@ -35,6 +35,7 @@ from models import (
     AgentRunStatus,
     AgentStep,
     AgentStepStatus,
+    ApprovalRequest,
     InventoryItem,
     Order,
     ReplacementOrder,
@@ -65,6 +66,7 @@ def create_replacement(
     agent_run: AgentRun,
     request: CreateReplacementRequest,
     decision: ReplacementDecision,
+    authorization: ApprovalRequest | None = None,
 ) -> CreateReplacementResult:
     """校验全部前置条件后，为一个 eligible 的换货案例创建真实换货单。
 
@@ -74,12 +76,17 @@ def create_replacement(
 
     只有全部通过才写入换货单并提交；任何一步失败都返回结构化结果，同时把这次
     真实的 Tool 调用结果记录到 Agent Run 的步骤中。
+
+    ``authorization``（T022）：仅由 Resume 编排传入的一条 APPROVED ApprovalRequest。
+    风险门禁仍会照常求值；当它判断需要审批时，只有 ``authorization`` 精确匹配
+    当前 Run / 动作 / 订单 / 政策身份才放行这一次执行，否则仍然拦下。调用方无法
+    用该参数关闭或绕过风险门禁。
     """
-    outcome = _validate_preconditions(db, agent_run, request, decision)
+    outcome = _validate_preconditions(db, agent_run, request, decision, authorization)
     if isinstance(outcome, CreateReplacementResult):
         return _finish(db, agent_run, outcome)
 
-    order, ticket, inventory_item, risk = outcome
+    order, ticket, inventory_item, risk, authorized = outcome
     replacement = ReplacementOrder(
         business_key=f"{REPLACEMENT_KEY_PREFIX}{order.business_key}",
         order_id=order.id,
@@ -104,7 +111,9 @@ def create_replacement(
     result = CreateReplacementResult(
         status=CreateReplacementStatus.CREATED,
         replacement=_record_view(replacement, order, ticket, agent_run),
-        risk=risk,
+        # 经审批授权的执行：高风险事实已在 ApprovalRequest snapshot 里持久化，
+        # 这里不再把"需要审批"的风险判断塞进 created 结果（契约禁止）。
+        risk=None if authorized else risk,
     )
     return _finish(db, agent_run, result)
 
@@ -114,13 +123,15 @@ def _validate_preconditions(
     agent_run: AgentRun,
     request: CreateReplacementRequest,
     decision: ReplacementDecision,
+    authorization: ApprovalRequest | None = None,
 ):
     """逐条校验前置条件。
 
-    全部通过时返回 ``(order, ticket, inventory_item, risk)`` 三个真实持久化
-    实体外加风险门禁的判断结果，供调用方直接建立业务关联；任何一条前置条件不
-    满足则返回结构化失败结果。风险门禁是最后一道校验：它只在受保护动作真正
-    写入之前求值，命中即返回等待审批，绝不落到 ``db.add``。
+    全部通过时返回 ``(order, ticket, inventory_item, risk, authorized)`` 三个
+    真实持久化实体、风险门禁的判断结果，以及"是否经审批授权放行"的标记，供
+    调用方直接建立业务关联；任何一条前置条件不满足则返回结构化失败结果。风险
+    门禁是最后一道校验：它只在受保护动作真正写入之前求值，命中即返回等待审批
+    （或经匹配的 APPROVED 审批放行），绝不落到 ``db.add``。
     """
     # --- 1. 输入必须是已验证的 typed 请求 ---
     if not isinstance(request, CreateReplacementRequest):
@@ -239,9 +250,18 @@ def _validate_preconditions(
             "风险门禁无法从持久化状态取回判定引用的售后政策，拒绝执行换货",
         )
     if risk.requires_approval:
+        # T022：风险门禁不消失。它仍判断 HIGH / 需要审批；只是从"无审批即拦截"
+        # 变为"存在精确匹配的 APPROVED 审批即放行这一次执行"。authorization 只能
+        # 由 Resume 编排从持久化状态取回，调用方无法夹带绕过门禁。
+        if authorization is not None:
+            if approval_authorizes(
+                authorization, agent_run, order.business_key, risk.policy_key
+            ):
+                return order, ticket, inventory_item, risk, True
+            return _authorization_mismatch()
         return _approval_required(risk)
 
-    return order, ticket, inventory_item, risk
+    return order, ticket, inventory_item, risk, False
 
 
 def _find_existing_replacement(
@@ -325,6 +345,20 @@ def _approval_required(risk: RiskAssessment) -> CreateReplacementResult:
         status=CreateReplacementStatus.APPROVAL_REQUIRED,
         failure_reason=risk.reason,
         risk=risk,
+    )
+
+
+def _authorization_mismatch() -> CreateReplacementResult:
+    """把"审批授权与当前执行上下文不匹配"表示为 fail closed。
+
+    T022 的绑定边界：调用方确实提供了一条审批授权，但它不是为这一次 Run / 这个
+    受保护动作 / 这个业务上下文而签发的。这与 APPROVAL_REQUIRED 不同——后者是
+    根本没有授权，前者是授权对不上，两者都绝不执行换货。它也不创建 pending 审批
+    请求（已有审批请求仍停留在 APPROVED，不会被覆盖或重置）。
+    """
+    return _failure(
+        CreateReplacementStatus.AUTHORIZATION_MISMATCH,
+        "提供的审批授权与当前要执行的受保护动作不匹配，拒绝执行",
     )
 
 

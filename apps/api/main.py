@@ -5,14 +5,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
-from agent_run_service import run_golden_path
+from agent_run_service import (
+    AgentRunNotFoundError,
+    ApprovalNotFoundError,
+    ResumeConflictError,
+    resume_agent_run,
+    run_golden_path,
+)
 from approval_decision_service import (
     ApprovalConflictError,
     ApprovalRequestNotFoundError,
     approve,
     reject,
 )
-from approval_service import approval_record, get_pending_approval
+from approval_service import approval_record, get_approval_request, get_pending_approval
 from approvals import ApprovalRequestStatus
 from config import settings
 from database import get_db
@@ -286,6 +292,18 @@ class AgentRunResponse(BaseModel):
     approval_request: AgentRunApprovalRequestResponse | None
 
 
+class ResumeAgentRunResponse(BaseModel):
+    """T022 恢复执行的响应：本次 Run 的真实终态 + 授权它的那条审批请求。
+
+    审批请求字段（key / status / protected_action）来自授权本次执行的那条 durable
+    ApprovalRequest；Run 字段（含 replacement 身份、ticket 当前状态与步骤时间线）
+    来自恢复执行后的真实持久化状态。低风险 Run 没有审批请求，``approval`` 为 null。
+    """
+
+    agent_run: AgentRunResponse
+    approval: ApprovalDecisionResponse | None = None
+
+
 def _risk_view(risk) -> AgentRunRiskResponse:
     """把一次风险判断（当场求值的结果或持久化快照）映射为响应模型。
 
@@ -493,7 +511,15 @@ def _approval_decision_response(
     except ApprovalConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
-    record = approval_record(approval)
+    return _approval_decision_view(approval_record(approval))
+
+
+def _approval_decision_view(record) -> ApprovalDecisionResponse:
+    """把已持久化审批请求的类型化视图映射为决策响应模型。
+
+    与 T021 的决策端点共用同一映射：只暴露稳定业务标识、状态与快照，不含自增
+    主键或任何 ORM 内部字段。T022 的 Resume 响应同样用它展示授权来源。
+    """
     return ApprovalDecisionResponse(
         approval_key=record.approval_key,
         status=record.status.value,
@@ -541,6 +567,38 @@ async def reject_approval_request(
     """
     return _approval_decision_response(
         db, approval_key, ApprovalRequestStatus.REJECTED, _decision_reason(body)
+    )
+
+
+@app.post(
+    "/agent-runs/{agent_run_key}/resume",
+    response_model=ResumeAgentRunResponse,
+)
+async def resume_agent_run_endpoint(
+    agent_run_key: str, db: Session = Depends(get_db)
+) -> ResumeAgentRunResponse:
+    """对一条已 APPROVED 的 Run 显式恢复执行（T022）。
+
+    这是 approve 之后的**独立**动作：只依据数据库里那条 durable ApprovalRequest
+    判定是否允许恢复，绝不接受任何客户端夹带的 approved / skipRisk / bypass 字段。
+    不存在 Run 或审批请求返回 404；pending / rejected / 不匹配 / 状态不允许一律
+    409；已经 completed 的 Run 返回当前状态（幂等），不重新执行业务动作。
+    """
+    try:
+        agent_run = resume_agent_run(db, agent_run_key)
+    except (AgentRunNotFoundError, ApprovalNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ResumeConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    approval = get_approval_request(db, agent_run)
+    return ResumeAgentRunResponse(
+        agent_run=_agent_run_response(db, agent_run),
+        approval=(
+            _approval_decision_view(approval_record(approval))
+            if approval is not None
+            else None
+        ),
     )
 
 

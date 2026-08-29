@@ -117,6 +117,62 @@ def get_pending_approval(
     )
 
 
+def get_approval_request(
+    db: Session,
+    agent_run: AgentRun,
+    protected_action: ProtectedAction = ProtectedAction.CREATE_REPLACEMENT,
+) -> ApprovalRequest | None:
+    """按 Agent Run 与受保护动作取回审批请求（不区分状态），没有则返回 ``None``。
+
+    与 ``get_pending_approval`` 不同，这里不筛选状态：T022 的 Resume 需要拿到
+    已经 APPROVED / REJECTED 的审批请求，才能精确判定"这次 Run 的这次动作到底
+    有没有获得授权"。当前领域里同一次 Run 的同一动作至多存在一条审批请求
+    （business_key 唯一），因此这里返回的是唯一一条。
+    """
+    if agent_run is None or agent_run.id is None:
+        return None
+    return (
+        db.query(ApprovalRequest)
+        .filter(
+            ApprovalRequest.agent_run_id == agent_run.id,
+            ApprovalRequest.protected_action == protected_action,
+        )
+        .order_by(ApprovalRequest.id.desc())
+        .first()
+    )
+
+
+def approval_authorizes(
+    approval: ApprovalRequest | None,
+    agent_run: AgentRun,
+    order_key: str | None,
+    policy_key: str | None,
+) -> bool:
+    """判断一条审批请求是否精确授权当前 Run 的当前受保护动作。
+
+    T022 的绑定语义：一条 APPROVED 审批请求只能授权它自己关联的 AgentRun、它
+    记录的受保护动作、以及它快照里钉住的那张订单与那条政策身份。任何一项对不上
+    都返回 ``False``，由调用方 fail closed。
+
+    刻意**不**比较金额与阈值：政策阈值日后变化不应重新否定历史审批，历史授权
+    依据是当时持久化的 RiskAssessment snapshot；这里只核对稳定可识别的身份事实
+    （action / AgentRun / order_key / policy_key）。
+    """
+    if approval is None or agent_run is None:
+        return False
+    if approval.agent_run_id != agent_run.id:
+        return False
+    if approval.protected_action is not ProtectedAction.CREATE_REPLACEMENT:
+        return False
+    if approval.status is not ApprovalRequestStatus.APPROVED:
+        return False
+    if approval.risk_order_key != order_key:
+        return False
+    if approval.risk_policy_key != policy_key:
+        return False
+    return True
+
+
 def risk_snapshot_of(approval: ApprovalRequest) -> RiskSnapshot:
     """把持久化的风险快照还原成 typed 视图。
 

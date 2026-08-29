@@ -36,21 +36,31 @@ from datetime import datetime
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from approval_service import approval_authorizes, get_approval_request
+from approvals import ApprovalRequestStatus
 from decision_service import decide_replacement
 from decisions import ReplacementDecisionStatus
 from intent_proposal import propose_replacement_intent
 from intent_service import INTENT_STEP_NAME, extract_and_persist_intent
-from intents import IntentExtractionStatus
+from intents import (
+    IntentExtractionOutcome,
+    IntentExtractionStatus,
+    IntentType,
+    RequestedAction,
+    ReplacementIntent,
+)
 from inventory import CheckInventoryRequest, InventoryCheckStatus
 from inventory_service import (
     INVENTORY_CHECK_STEP_NAME,
     check_and_persist_inventory,
+    check_inventory,
 )
 from models import (
     AgentRun,
     AgentRunStatus,
     AgentStep,
     AgentStepStatus,
+    ApprovalRequest,
     Ticket,
     TicketResolution,
 )
@@ -93,6 +103,30 @@ _MAX_RUN_KEY_ATTEMPTS = 5
 
 # 回写工单的结果摘要列宽，与 UpdateTicketRequest.summary 保持一致
 _MAX_SUMMARY_LENGTH = 1000
+
+
+class AgentRunNotFoundError(Exception):
+    """恢复执行时找不到对应的 AgentRun。"""
+
+    def __init__(self, agent_run_key: str) -> None:
+        super().__init__(f"未找到 AgentRun: {agent_run_key}")
+        self.agent_run_key = agent_run_key
+
+
+class ApprovalNotFoundError(Exception):
+    """该 Run 的受保护动作不存在任何审批请求。"""
+
+    def __init__(self, agent_run_key: str) -> None:
+        super().__init__(f"AgentRun {agent_run_key} 没有可恢复的审批请求")
+        self.agent_run_key = agent_run_key
+
+
+class ResumeConflictError(Exception):
+    """审批请求或 Run 的当前状态不允许恢复执行。"""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
 
 
 def run_golden_path(
@@ -429,6 +463,208 @@ def _await_approval(db: Session, agent_run: AgentRun) -> AgentRun:
     agent_run.completed_at = None
     agent_run.error_message = None
     db.commit()
+    db.refresh(agent_run)
+    return agent_run
+
+
+def resume_agent_run(db: Session, agent_run_key: str) -> AgentRun:
+    """对一条已 APPROVED 的高风险 Run 恢复执行其受保护动作并完成闭环（T022）。
+
+    approve（T021）与本函数是两个**独立**动作：approve 只把审批请求记录为
+    APPROVED，绝不自动恢复执行；本函数是紧随其后、由调用方显式触发的 Resume。
+    授权事实只来自数据库里那条 durable ApprovalRequest，绝不来自任何请求参数。
+
+    返回的 ``AgentRun`` 状态就是恢复执行后的真实终态：只有换货单真实落库且工单
+    真实回写之后才是 ``COMPLETED``，任何失败都是 ``FAILED``；等待 / 已拒绝 /
+    不匹配一律抛异常，由 API 层映射为 404 / 409，本函数不做任何业务副作用。
+    """
+    agent_run = _load_agent_run(db, agent_run_key)
+    if agent_run is None:
+        raise AgentRunNotFoundError(agent_run_key)
+    if agent_run.status is AgentRunStatus.COMPLETED:
+        # 幂等：已经完成的 Run 直接返回当前持久化状态，绝不重新执行业务动作。
+        return agent_run
+    if agent_run.status is not AgentRunStatus.WAITING_FOR_APPROVAL:
+        raise ResumeConflictError(
+            f"AgentRun {agent_run_key} 当前状态为 {agent_run.status.value}，无法恢复执行"
+        )
+
+    # --- 审批守卫：授权只能来自持久化的 APPROVED ApprovalRequest ---
+    approval = get_approval_request(db, agent_run)
+    if approval is None:
+        raise ApprovalNotFoundError(agent_run_key)
+    if approval.status is ApprovalRequestStatus.PENDING:
+        raise ResumeConflictError(
+            f"审批请求 {approval.business_key} 仍为 pending，尚未获准恢复执行"
+        )
+    if approval.status is ApprovalRequestStatus.REJECTED:
+        raise ResumeConflictError(
+            f"审批请求 {approval.business_key} 已被拒绝，永久阻止恢复执行"
+        )
+
+    # --- 从持久化事实重建业务上下文（只读，不产生副作用） ---
+    context = _reconstruct_resume_context(db, agent_run)
+    if context is None:
+        return _fail_run(db, agent_run, "恢复执行失败: 无法从持久化状态重建业务上下文")
+    intent, order_facts, policy_key, decision = context
+
+    # --- 绑定校验：审批必须精确匹配当前 action / Run / 订单身份 / 政策身份 ---
+    if not approval_authorizes(approval, agent_run, order_facts.order_key, policy_key):
+        raise ResumeConflictError(
+            f"审批请求 {approval.business_key} 与当前业务上下文不匹配，拒绝执行"
+        )
+
+    # --- 数据库级 compare-and-set 领取执行权：并发 Resume 至多一个成功 ---
+    if not _claim_resume(db, agent_run_key):
+        db.expire_all()
+        reloaded = _load_agent_run(db, agent_run_key)
+        if reloaded is None:
+            raise AgentRunNotFoundError(agent_run_key)
+        if reloaded.status is AgentRunStatus.COMPLETED:
+            return reloaded
+        raise ResumeConflictError(
+            f"AgentRun {agent_run_key} 正在被另一恢复执行处理，本次放弃"
+        )
+
+    agent_run = _load_agent_run(db, agent_run_key)
+    try:
+        return _execute_resume(db, agent_run, approval, intent, order_facts, decision)
+    except Exception as exc:  # noqa: BLE001 - 恢复中断不得让 Run 悬停在 running
+        db.rollback()
+        reloaded = _load_agent_run(db, agent_run_key)
+        if reloaded is None:
+            raise
+        return _fail_run(db, reloaded, f"恢复执行中断: {type(exc).__name__}")
+
+
+def _load_agent_run(db: Session, agent_run_key: str) -> AgentRun | None:
+    """按业务标识取回一次 Agent Run，不存在则返回 ``None``。"""
+    return (
+        db.query(AgentRun)
+        .filter(AgentRun.business_key == agent_run_key)
+        .one_or_none()
+    )
+
+
+def _reconstruct_resume_context(db: Session, agent_run: AgentRun):
+    """从持久化事实重建恢复执行所需的业务上下文，失败返回 ``None``。
+
+    只读、不产生副作用：intent 来自已落库的 ``AgentIntent``，政策 / 订单 / 库存
+    来自当前持久化状态，decision 由 T015 的确定性判定重新求值。这里**不重新让
+    LLM 决定业务规则**——一切依据都是已经持久化或应用拥有的确定性事实。
+    """
+    ticket = agent_run.ticket
+    order = ticket.order if ticket is not None else None
+    agent_intent = agent_run.intent
+    if order is None or agent_intent is None:
+        return None
+
+    try:
+        intent = ReplacementIntent(
+            intent_type=IntentType(agent_intent.intent_type),
+            requested_action=RequestedAction(agent_intent.requested_action),
+            issue_summary=agent_intent.issue_summary,
+            confidence=agent_intent.confidence,
+        )
+    except (ValueError, TypeError):
+        return None
+
+    policy_result = lookup_replacement_policy(db, intent)
+    if (
+        policy_result.status is not PolicyLookupStatus.SUCCESS
+        or policy_result.source is None
+    ):
+        return None
+
+    order_result = get_order(db, GetOrderRequest(order_key=order.business_key))
+    if order_result.status is not OrderLookupStatus.SUCCESS or order_result.order is None:
+        return None
+
+    inventory_result = check_inventory(
+        db, CheckInventoryRequest(product_sku=order_result.order.product_sku)
+    )
+    decision = decide_replacement(
+        IntentExtractionOutcome(
+            status=IntentExtractionStatus.SUCCESS, intent=intent
+        ),
+        policy_result,
+        order_result,
+        inventory_result,
+    )
+    return intent, order_result.order, policy_result.source.policy_key, decision
+
+
+def _claim_resume(db: Session, agent_run_key: str) -> bool:
+    """数据库级 compare-and-set：只有 waiting_for_approval 的 Run 能被领取。
+
+    与 T021 的审批 CAS 同一思路：WHERE 里的 status = 'waiting_for_approval' 是
+    原子条件，两个并发 Resume 至多一个得到 rowcount == 1。失败者随后以数据库真实
+    状态判定为幂等（已 completed）或冲突（正在被另一恢复执行处理）。
+    """
+    updated = (
+        db.query(AgentRun)
+        .filter(
+            AgentRun.business_key == agent_run_key,
+            AgentRun.status == AgentRunStatus.WAITING_FOR_APPROVAL,
+        )
+        .update({AgentRun.status: AgentRunStatus.RUNNING}, synchronize_session=False)
+    )
+    db.commit()
+    return updated == 1
+
+
+def _execute_resume(
+    db: Session,
+    agent_run: AgentRun,
+    approval: ApprovalRequest,
+    intent: ReplacementIntent,
+    order_facts,
+    decision,
+) -> AgentRun:
+    """成功领取恢复权后，执行受保护动作（步骤 6）与工单回写（步骤 7）。"""
+    request = CreateReplacementRequest(
+        order_key=order_facts.order_key,
+        product_sku=order_facts.product_sku,
+        reason=intent.issue_summary,
+    )
+    replacement_result = create_replacement(
+        db, agent_run, request, decision, authorization=approval
+    )
+    if replacement_result.status is not CreateReplacementStatus.CREATED:
+        # APPROVAL_REQUIRED / AUTHORIZATION_MISMATCH / NOT_ELIGIBLE / 各类前置条件
+        # 失败 / DUPLICATE：一律不得继续，如实置为失败，绝不让工单被错误标记成功。
+        return _fail_run(
+            db,
+            agent_run,
+            _step_failure(
+                REPLACEMENT_STEP_NAME,
+                replacement_result.status.value,
+                replacement_result.failure_reason,
+            ),
+        )
+    replacement = replacement_result.replacement
+
+    update_result = update_ticket(
+        db,
+        agent_run,
+        UpdateTicketRequest(
+            ticket_key=agent_run.ticket.business_key,
+            resolution=TicketResolution.REPLACEMENT_CREATED,
+            replacement_key=replacement.replacement_key,
+            summary=_resolution_summary(replacement, order_facts, intent.issue_summary),
+        ),
+    )
+    if update_result.status is not UpdateTicketStatus.UPDATED:
+        return _fail_run(
+            db,
+            agent_run,
+            _step_failure(
+                UPDATE_TICKET_STEP_NAME,
+                update_result.status.value,
+                update_result.failure_reason,
+            ),
+        )
+
     db.refresh(agent_run)
     return agent_run
 
