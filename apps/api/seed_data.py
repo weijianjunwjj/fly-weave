@@ -4,15 +4,19 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
+from demo_policy_source import DEMO_REPLACEMENT_POLICY_DOCUMENT
 from models import (
     AfterSalesPolicy,
     Customer,
     InventoryItem,
     Order,
     OrderStatus,
+    PolicyChunk,
+    PolicyDocument,
     Ticket,
     TicketStatus,
 )
+from policy_ingestion_service import ingest_policy_document
 
 
 def clear_demo_data(db: Session) -> None:
@@ -22,6 +26,10 @@ def clear_demo_data(db: Session) -> None:
     db.query(Customer).filter(Customer.is_demo_data == True).delete()
     db.query(InventoryItem).filter(InventoryItem.is_demo_data == True).delete()
     db.query(AfterSalesPolicy).filter(AfterSalesPolicy.is_demo_data == True).delete()
+    # T024：policy knowledge 层。先删 chunks 再删 documents（虽然后者有 ON DELETE
+    # CASCADE，这里仍显式清理以保证删除顺序确定、不遗留阻塞下次 seed 的脏数据）。
+    db.query(PolicyChunk).filter(PolicyChunk.is_demo_data == True).delete()
+    db.query(PolicyDocument).filter(PolicyDocument.is_demo_data == True).delete()
     db.commit()
 
 
@@ -38,6 +46,10 @@ def seed_demo_data(db: Session) -> dict:
     会先清空现有 demo 数据再重建，因此可反复产生同一份规范演示数据集。
     """
     clear_demo_data(db)
+
+    # T024：把可摄取的政策知识源材料通过 deterministic ingestion 落库为
+    # PolicyDocument + PolicyChunk，作为后续 retrieval corpus 的稳定基线。
+    ingestion_result = ingest_policy_document(db, DEMO_REPLACEMENT_POLICY_DOCUMENT)
 
     policy = AfterSalesPolicy(
         business_key="policy-replacement-standard",
@@ -167,6 +179,8 @@ def seed_demo_data(db: Session) -> dict:
 
     return {
         "policy_business_key": policy.business_key,
+        "policy_document_key": ingestion_result.document_key,
+        "policy_document_chunk_count": ingestion_result.chunk_count,
         "low_risk_ticket": ticket_low_risk.business_key,
         "approval_required_ticket": ticket_approval.business_key,
         "rejected_ticket": ticket_rejected.business_key,

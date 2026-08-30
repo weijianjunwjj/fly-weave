@@ -184,6 +184,81 @@ class AfterSalesPolicy(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
+class PolicyDocument(Base):
+    """政策知识文档（T024）。
+
+    这是 policy knowledge 的 durable persistence 落点：把当前直接内嵌在 seed
+    字符串里的政策文本提升为一份真正可摄取、可追溯、可重复摄取的知识文档。
+
+    与 ``AfterSalesPolicy``（deterministic lookup 的结构化规则）不同，本模型
+    保存的是 **raw canonical content** 及其分块，供后续 retrieval corpus 使用，
+    不改变现有 Golden Path。
+
+    - ``business_key``：稳定文档业务标识，跨环境重复摄取幂等；
+    - ``source_reference``：稳定来源定位符，唯一，使 chunk 能追溯到来源；
+    - ``version`` / ``content_identity``：最小版本语义。``content_identity``
+      是 canonical content 的 sha256；同一 content 重复摄取不会递增版本，
+      content 变化时才 ``version += 1`` 并原子替换 chunks。
+    """
+    __tablename__ = "policy_documents"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    business_key = Column(String(128), unique=True, nullable=False, index=True)
+    title = Column(String(128), nullable=False)
+    source_reference = Column(String(256), unique=True, nullable=False, index=True)
+    # content 每次变化递增；同一 content 幂等摄取保持当前版本不变
+    version = Column(Integer, nullable=False, default=1)
+    # canonical content 的稳定身份指纹，用于幂等判定与变更检测
+    content_identity = Column(String(64), nullable=False)
+    # 规范化后的原始政策文本，chunking 的权威输入
+    raw_content = Column(Text, nullable=False)
+    is_demo_data = Column(Boolean, nullable=False, default=True)
+    # 摄取（ingest）时刻；重复摄取同一 content 时保持第一次摄取的时间不变
+    ingested_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    chunks = relationship(
+        "PolicyChunk",
+        back_populates="document",
+        order_by="PolicyChunk.chunk_order",
+        cascade="all, delete-orphan",
+    )
+
+
+class PolicyChunk(Base):
+    """政策文档的确定性分块（T024）。
+
+    每个 chunk 是可追溯到原始 ``PolicyDocument`` 的最小文本片段。chunk 只由
+    deterministic chunking 产生，绝不依赖 LLM。``chunk_order`` 从 1 开始稳定
+    递增，保证同样输入产生同样顺序的 chunks。
+
+    - ``business_key``：稳定 chunk 标识（由 document business_key + chunk_order
+      确定性派生），跨重复摄取保持一致；
+    - ``document_id``：指向原始 PolicyDocument 的外键，ON DELETE CASCADE 使
+      demo 重置（clear_demo_data 删除 documents）保持可重复；
+    - ``source_reference``：冗余保存来源定位符，使 chunk 即使不 join document
+      也保留 source identity。
+    """
+    __tablename__ = "policy_chunks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    business_key = Column(String(128), unique=True, nullable=False, index=True)
+    document_id = Column(
+        Integer, ForeignKey("policy_documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # 从 1 开始的稳定 chunk 序号，保证同一文档内 chunk 顺序确定
+    chunk_order = Column(Integer, nullable=False)
+    text = Column(Text, nullable=False)
+    source_reference = Column(String(256), nullable=False)
+    is_demo_data = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    document = relationship("PolicyDocument", back_populates="chunks")
+
+    __table_args__ = (
+        UniqueConstraint("document_id", "chunk_order", name="uq_policy_chunks_document_order"),
+    )
+
+
 class Ticket(Base):
     """客服工单"""
     __tablename__ = "tickets"
