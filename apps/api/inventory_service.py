@@ -19,6 +19,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from audit_service import record_audit_event
 from inventory import (
     CheckInventoryRequest,
     InventoryCheckResult,
@@ -26,11 +27,13 @@ from inventory import (
     InventoryFacts,
 )
 from models import (
+    ActorType,
     AgentInventoryCheck,
     AgentRun,
     AgentRunStatus,
     AgentStep,
     AgentStepStatus,
+    AuditEventType,
     InventoryItem,
 )
 
@@ -117,6 +120,25 @@ def check_and_persist_inventory(
         step.error_message = _format_failure_message(result)
 
     _upsert_agent_inventory_check(db, agent_run, result)
+    # T023：check_inventory 已真实执行，结果直接来自本次查询。有货 / 无货 / 查无 /
+    # 非法输入四种状态各自如实记录，success 只在真正查到可用库存时为真。
+    requested_sku = (
+        result.requested_sku
+        if result.requested_sku is not None
+        else getattr(request, "product_sku", None)
+    )
+    record_audit_event(
+        db,
+        agent_run=agent_run,
+        event_type=AuditEventType.CHECK_INVENTORY,
+        actor_type=ActorType.AGENT,
+        outcome=result.status.value,
+        success=result.status is InventoryCheckStatus.SUCCESS,
+        action="check_inventory",
+        summary=f"检查库存: sku={requested_sku} status={result.status.value}",
+        affected_object_type="inventory_item",
+        affected_object_key=requested_sku,
+    )
     db.commit()
     return result
 

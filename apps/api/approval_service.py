@@ -27,7 +27,8 @@ from approvals import (
     ApprovalRequestStatus,
     RiskSnapshot,
 )
-from models import AgentRun, ApprovalRequest
+from audit_service import record_audit_event
+from models import ActorType, AgentRun, ApprovalRequest, AuditEventType
 from risk import ProtectedAction, RiskAssessment
 
 # 审批请求业务标识的确定性前缀。同一次 Run 的同一个受保护动作，标识稳定可预期，
@@ -92,6 +93,32 @@ def create_or_get_pending_approval(
         return concurrent
 
     savepoint.commit()
+    # T023：pending 审批请求已真实落库（flush 成功）之后才记录创建事件。审批请求
+    # 是"受保护动作被风险门禁拦下"的权威事实，审计只记录这一事实，不记录尚未发生
+    # 的 approve / reject。本模块不 commit，事件随 replacement_service 的 mutation
+    # boundary 一起提交。
+    record_audit_event(
+        db,
+        agent_run=agent_run,
+        event_type=AuditEventType.APPROVAL_REQUEST_CREATED,
+        actor_type=ActorType.SYSTEM,
+        outcome="created",
+        success=True,
+        action="approval_request_created",
+        summary=(
+            f"审批请求创建: approval={approval.business_key} "
+            f"action={snapshot.action.value}"
+        ),
+        affected_object_type="approval_request",
+        affected_object_key=approval.business_key,
+        reference_type="approval",
+        reference_key=approval.business_key,
+        metadata={
+            "protected_action": snapshot.action.value,
+            "rule_code": snapshot.rule_code.value,
+            "level": snapshot.level.value,
+        },
+    )
     return approval
 
 

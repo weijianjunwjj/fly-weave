@@ -28,14 +28,17 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from approval_service import approval_authorizes, create_or_get_pending_approval
+from audit_service import record_audit_event
 from decision_service import REPLACEABLE_ORDER_STATUSES
 from decisions import ReplacementDecision, ReplacementDecisionStatus
 from models import (
+    ActorType,
     AgentRun,
     AgentRunStatus,
     AgentStep,
     AgentStepStatus,
     ApprovalRequest,
+    AuditEventType,
     InventoryItem,
     Order,
     ReplacementOrder,
@@ -398,18 +401,53 @@ def _finish(
         step.completed_at = datetime.utcnow()
         step.status = AgentStepStatus.COMPLETED
         step.error_message = None
+        # T023：换货单已在上面真实落库（flush 成功）之后才记录 success，绝不依据
+        # 模型文本。低风险放行时 result.risk 为非空的 LOW 判断，据此记录 risk_gate
+        # allow；经审批授权放行时 result.risk 为 None，风险门禁已在初次进入审批时
+        # 记录过 approval_required，无需重复。
+        if result.risk is not None:
+            _record_risk_gate(db, agent_run, result.risk, "allow")
+        record_audit_event(
+            db,
+            agent_run=agent_run,
+            event_type=AuditEventType.CREATE_REPLACEMENT,
+            actor_type=ActorType.AGENT,
+            outcome=CreateReplacementStatus.CREATED.value,
+            success=True,
+            action="create_replacement",
+            summary=f"创建换货单: replacement={result.replacement.replacement_key}",
+            affected_object_type="replacement_order",
+            affected_object_key=result.replacement.replacement_key,
+        )
     elif result.status is CreateReplacementStatus.APPROVAL_REQUIRED:
         # 受保护动作被风险门禁拦下，既没成功也没失败，只暂停等待人工审批。
         # 步骤保持 pending 并如实记录风险原因，completed_at 保持为空：它没有完成。
         step.status = AgentStepStatus.PENDING
         step.completed_at = None
         step.error_message = _format_failure_message(result)
+        # T023：风险门禁命中，受保护动作被拦下。记录 approval_required，不记录
+        # create_replacement（换货没有发生，禁止记录尚未发生的成功）。
+        _record_risk_gate(db, agent_run, result.risk, "approval_required")
         # T020：审批请求与 Run 的等待审批状态必须一起落库，见下方说明
         _enter_waiting_for_approval(db, agent_run, result.risk)
     else:
         step.completed_at = datetime.utcnow()
         step.status = AgentStepStatus.FAILED
         step.error_message = _format_failure_message(result)
+        # T023：换货执行失败（重复 / 前置条件不满足 / 授权不匹配等），如实记录
+        # failure，不伪造成功；affected_object_key 仅在 duplicate 时指向已存在换货单。
+        record_audit_event(
+            db,
+            agent_run=agent_run,
+            event_type=AuditEventType.CREATE_REPLACEMENT,
+            actor_type=ActorType.AGENT,
+            outcome=result.status.value,
+            success=False,
+            action="create_replacement",
+            summary=f"创建换货单失败: status={result.status.value}",
+            affected_object_type="replacement_order",
+            affected_object_key=result.existing_replacement_key,
+        )
 
     db.commit()
     return result
@@ -484,3 +522,26 @@ def _format_failure_message(result: CreateReplacementResult) -> str:
     if result.failure_reason:
         parts.append(f"reason={result.failure_reason}")
     return "; ".join(parts)
+
+
+def _record_risk_gate(
+    db: Session, agent_run: AgentRun, risk: RiskAssessment, outcome: str
+) -> None:
+    """把风险门禁的真实判断结果记为 audit 事件（T023）。
+
+    ``risk`` 来自 T019 的确定性求值，``outcome`` 只能是 allow / approval_required；
+    本函数只记录这一次门禁判断，不重新求值、不决定后续动作。
+    """
+    record_audit_event(
+        db,
+        agent_run=agent_run,
+        event_type=AuditEventType.RISK_GATE,
+        actor_type=ActorType.SYSTEM,
+        outcome=outcome,
+        success=outcome == "allow",
+        action="risk_gate",
+        summary=f"风险门禁: outcome={outcome} rule_code={risk.rule_code.value}",
+        affected_object_type="order",
+        affected_object_key=risk.order_key,
+        metadata={"rule_code": risk.rule_code.value, "level": risk.level.value},
+    )

@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session
 
 from approval_service import approval_authorizes, get_approval_request
 from approvals import ApprovalRequestStatus
+from audit_service import record_audit_event
 from decision_service import decide_replacement
 from decisions import ReplacementDecisionStatus
 from intent_proposal import propose_replacement_intent
@@ -56,11 +57,13 @@ from inventory_service import (
     check_inventory,
 )
 from models import (
+    ActorType,
     AgentRun,
     AgentRunStatus,
     AgentStep,
     AgentStepStatus,
     ApprovalRequest,
+    AuditEventType,
     Ticket,
     TicketResolution,
 )
@@ -214,6 +217,28 @@ def _execute(
 
     order_result = get_order(db, order_request)
     order_ok = order_result.status is OrderLookupStatus.SUCCESS
+    # T023：get_order 已真实执行，结果直接来自本次查询；审计记录的是这次查询的
+    # 真实状态，而不是一句"订单已查到"的结论。
+    record_audit_event(
+        db,
+        agent_run=agent_run,
+        event_type=AuditEventType.GET_ORDER,
+        actor_type=ActorType.AGENT,
+        outcome=order_result.status.value,
+        success=order_ok,
+        action="get_order",
+        summary=(
+            f"查询订单: order={order_result.order.order_key}"
+            if order_ok and order_result.order is not None
+            else f"查询订单失败: status={order_result.status.value}"
+        ),
+        affected_object_type="order",
+        affected_object_key=(
+            order_result.order.order_key
+            if order_result.order is not None
+            else order_result.requested_order_key
+        ),
+    )
     _record_step(
         db,
         agent_run,
@@ -261,6 +286,23 @@ def _execute(
         intent_outcome, policy_result, order_result, inventory_result
     )
     decision_ok = decision.status is ReplacementDecisionStatus.ELIGIBLE
+    # T023：结构化换货判定已真实产生，结果与理由码直接来自 decision，不重新推导。
+    record_audit_event(
+        db,
+        agent_run=agent_run,
+        event_type=AuditEventType.DECISION_PRODUCED,
+        actor_type=ActorType.AGENT,
+        outcome=decision.status.value,
+        success=decision_ok,
+        action="decide_replacement",
+        summary=(
+            f"换货资格判定: status={decision.status.value} "
+            f"reason_code={decision.reason_code.value}"
+        ),
+        affected_object_type="order",
+        affected_object_key=order_facts.order_key,
+        metadata={"reason_code": decision.reason_code.value},
+    )
     _record_step(
         db,
         agent_run,
@@ -441,6 +483,20 @@ def _fail_run(db: Session, agent_run: AgentRun, error_message: str) -> AgentRun:
     agent_run.status = AgentRunStatus.FAILED
     agent_run.completed_at = datetime.utcnow()
     agent_run.error_message = error_message
+    # T023：失败终态只在这里与 ticket_service 的 completed 两个入口产生。审计
+    # 记录的是真实持久化终态，而不是 error_message 里的一段文本复述。
+    record_audit_event(
+        db,
+        agent_run=agent_run,
+        event_type=AuditEventType.AGENT_RUN_OUTCOME,
+        actor_type=ActorType.AGENT,
+        outcome=AgentRunStatus.FAILED.value,
+        success=False,
+        action="agent_run_outcome",
+        summary="AgentRun 终态: status=failed",
+        affected_object_type="agent_run",
+        affected_object_key=agent_run.business_key,
+    )
     db.commit()
     db.refresh(agent_run)
     return agent_run

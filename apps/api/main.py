@@ -22,7 +22,7 @@ from approval_service import approval_record, get_approval_request, get_pending_
 from approvals import ApprovalRequestStatus
 from config import settings
 from database import get_db
-from models import AgentRun, AgentRunStatus, Ticket
+from models import AgentRun, AgentRunStatus, AuditEvent, Ticket
 from risk_service import assess_persisted_replacement_risk
 
 
@@ -600,6 +600,75 @@ async def resume_agent_run_endpoint(
             else None
         ),
     )
+
+
+class AuditEventResponse(BaseModel):
+    """一次已经真实发生的执行事实的审计事件（T023）。
+
+    每个字段都直接来自数据库中真实存在的 ``AuditEvent`` 行，不含自增主键或任何
+    ORM 内部字段。``outcome`` 是事件的具体结果语义（success / unavailable / allow /
+    approval_required / created / updated / completed ...），``success`` 是通用的
+    正向标记；二者来自真实持久化结果，而非模型文本。
+    """
+
+    event_key: str
+    event_type: str
+    actor_type: str
+    occurred_at: datetime
+    outcome: str
+    success: bool
+    action: str
+    summary: str
+    affected_object_type: str | None
+    affected_object_key: str | None
+    reference_type: str | None
+    reference_key: str | None
+
+
+@app.get(
+    "/agent-runs/{agent_run_key}/audit-events",
+    response_model=list[AuditEventResponse],
+)
+async def list_audit_events(
+    agent_run_key: str, db: Session = Depends(get_db)
+) -> list[AuditEventResponse]:
+    """返回一次 Agent Run 的完整审计时间线。
+
+    事件按 ``occurred_at`` 升序、``id`` 升序排序，顺序确定、可复现；同一条业务
+    事实因幂等去重只会出现一次。未知 Agent Run 返回诚实的 404，绝不返回空列表
+    冒充"没有事件"。
+    """
+    agent_run = (
+        db.query(AgentRun)
+        .filter(AgentRun.business_key == agent_run_key)
+        .one_or_none()
+    )
+    if agent_run is None:
+        raise HTTPException(status_code=404, detail=f"未找到 AgentRun: {agent_run_key}")
+
+    events = (
+        db.query(AuditEvent)
+        .filter(AuditEvent.agent_run_id == agent_run.id)
+        .order_by(AuditEvent.occurred_at.asc(), AuditEvent.id.asc())
+        .all()
+    )
+    return [
+        AuditEventResponse(
+            event_key=event.business_key,
+            event_type=event.event_type.value,
+            actor_type=event.actor_type.value,
+            occurred_at=event.occurred_at,
+            outcome=event.outcome,
+            success=event.success,
+            action=event.action,
+            summary=event.summary,
+            affected_object_type=event.affected_object_type,
+            affected_object_key=event.affected_object_key,
+            reference_type=event.reference_type,
+            reference_key=event.reference_key,
+        )
+        for event in events
+    ]
 
 
 if __name__ == "__main__":

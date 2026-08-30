@@ -28,11 +28,14 @@ from datetime import datetime
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from audit_service import record_audit_event
 from models import (
+    ActorType,
     AgentRun,
     AgentRunStatus,
     AgentStep,
     AgentStepStatus,
+    AuditEventType,
     ReplacementOrder,
     Ticket,
     TicketStatus,
@@ -213,11 +216,51 @@ def _finish(
         step.status = AgentStepStatus.COMPLETED
         step.error_message = None
         _mark_run_completed(agent_run)
+        # T023：工单已真实回写、Run 已进入 completed 之后才记录 success；这是
+        # completed 终态的唯一入口，与 agent_run_service._fail_run 的 failed 入口
+        # 并列。审计记录的是真实持久化结果，不是"工单已处理"的结论文本。
+        record_audit_event(
+            db,
+            agent_run=agent_run,
+            event_type=AuditEventType.UPDATE_TICKET,
+            actor_type=ActorType.AGENT,
+            outcome=UpdateTicketStatus.UPDATED.value,
+            success=True,
+            action="update_ticket",
+            summary=f"回写工单: ticket={result.ticket.ticket_key}",
+            affected_object_type="ticket",
+            affected_object_key=result.ticket.ticket_key,
+        )
+        record_audit_event(
+            db,
+            agent_run=agent_run,
+            event_type=AuditEventType.AGENT_RUN_OUTCOME,
+            actor_type=ActorType.AGENT,
+            outcome=AgentRunStatus.COMPLETED.value,
+            success=True,
+            action="agent_run_outcome",
+            summary="AgentRun 终态: status=completed",
+            affected_object_type="agent_run",
+            affected_object_key=agent_run.business_key,
+        )
     else:
         step.status = AgentStepStatus.FAILED
         step.error_message = _format_failure_message(result)
         # Run 保持非 completed。这里不把 Run 判为 failed：与既有服务一致，
         # 单个 Tool 失败不等于整次 Run 终结，终态由端到端编排（T018）决定。
+        # T023：工单回写失败，如实记录 failure，不伪造成功。
+        record_audit_event(
+            db,
+            agent_run=agent_run,
+            event_type=AuditEventType.UPDATE_TICKET,
+            actor_type=ActorType.AGENT,
+            outcome=result.status.value,
+            success=False,
+            action="update_ticket",
+            summary=f"回写工单失败: status={result.status.value}",
+            affected_object_type="ticket",
+            affected_object_key=agent_run.ticket.business_key,
+        )
 
     db.commit()
     return result

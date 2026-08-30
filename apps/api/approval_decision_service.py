@@ -34,7 +34,8 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from approvals import ApprovalRequestStatus
-from models import AgentRun, AgentRunStatus, ApprovalRequest
+from audit_service import record_audit_event
+from models import ActorType, AgentRun, AgentRunStatus, ApprovalRequest, AuditEventType
 
 
 class ApprovalRequestNotFoundError(Exception):
@@ -110,6 +111,10 @@ def _decide(
         # 等待审批"的中间态。
         if target is ApprovalRequestStatus.REJECTED:
             _cancel_waiting_run(db, approval_key, now)
+        # T023：只有真正赢得 CAS 状态迁移的一方产生 HUMAN 审批审计事件；幂等重试
+        # 与并发冲突走下面的 CAS 未命中分支，绝不产生第二条事件。事件随本次决策
+        # 事务一起提交。
+        _record_decision_audit(db, approval_key, target, decision_reason, now)
         db.commit()
         db.expire_all()
         return _load_approval(db, approval_key)
@@ -199,4 +204,50 @@ def _load_approval(
         db.query(ApprovalRequest)
         .filter(ApprovalRequest.business_key == approval_key)
         .one_or_none()
+    )
+
+
+def _record_decision_audit(
+    db: Session,
+    approval_key: str,
+    target: ApprovalRequestStatus,
+    decision_reason: str | None,
+    now: datetime,
+) -> None:
+    """把一次真正赢得状态迁移的人工审批决策记为 HUMAN 审计事件（T023）。
+
+    只记录审批请求 key、受保护动作、决策时刻与可选理由；当前系统没有真实用户
+    体系，因此绝不虚构 actor 的 username / role / employee id。actor_type 只表达
+    "这是人工做的决定"这一事实。
+    """
+    approval = _load_approval(db, approval_key)
+    if approval is None or approval.agent_run is None:
+        return
+
+    approved = target is ApprovalRequestStatus.APPROVED
+    record_audit_event(
+        db,
+        agent_run=approval.agent_run,
+        event_type=(
+            AuditEventType.APPROVAL_APPROVED
+            if approved
+            else AuditEventType.APPROVAL_REJECTED
+        ),
+        actor_type=ActorType.HUMAN,
+        outcome=target.value,
+        success=approved,
+        action="approve" if approved else "reject",
+        summary=(
+            f"人工{'批准' if approved else '拒绝'}审批请求: approval={approval_key} "
+            f"action={approval.protected_action.value}"
+        ),
+        occurred_at=now,
+        affected_object_type="approval_request",
+        affected_object_key=approval_key,
+        reference_type="approval",
+        reference_key=approval_key,
+        metadata={
+            "protected_action": approval.protected_action.value,
+            "decision_reason": decision_reason,
+        },
     )

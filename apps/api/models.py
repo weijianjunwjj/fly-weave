@@ -81,6 +81,37 @@ class ReplacementStatus(PyEnum):
     CREATED = "created"
 
 
+class AuditEventType(PyEnum):
+    """AuditEvent 的事件类型（T023）。
+
+    每个取值对应现有真实流程里已经发生的一类事实，不在列表中的动作一律不产生
+    审计事件，绝不记录尚未真实发生的事。
+    """
+
+    DECISION_PRODUCED = "decision_produced"
+    GET_ORDER = "get_order"
+    CHECK_INVENTORY = "check_inventory"
+    RISK_GATE = "risk_gate"
+    APPROVAL_REQUEST_CREATED = "approval_request_created"
+    APPROVAL_APPROVED = "approval_approved"
+    APPROVAL_REJECTED = "approval_rejected"
+    CREATE_REPLACEMENT = "create_replacement"
+    UPDATE_TICKET = "update_ticket"
+    AGENT_RUN_OUTCOME = "agent_run_outcome"
+
+
+class ActorType(PyEnum):
+    """AuditEvent 的触发者类型。
+
+    只区分自动化执行（AGENT / SYSTEM）与人工（HUMAN）三类；当前系统没有真实
+    用户体系，因此不虚构 username / role / employee id 等身份字段。
+    """
+
+    AGENT = "agent"
+    SYSTEM = "system"
+    HUMAN = "human"
+
+
 class Customer(Base):
     """客户 / 客户引用信息"""
     __tablename__ = "customers"
@@ -280,6 +311,14 @@ class AgentRun(Base):
         "ApprovalRequest",
         back_populates="agent_run",
         order_by="ApprovalRequest.id",
+        cascade="all, delete-orphan",
+    )
+    # T023：一次 Run 产生的一组审计事件。事件只有在真实领域事实落库之后才写入，
+    # 随 Run 的删除一并清理。
+    audit_events = relationship(
+        "AuditEvent",
+        back_populates="agent_run",
+        order_by="AuditEvent.id",
         cascade="all, delete-orphan",
     )
 
@@ -558,3 +597,81 @@ class ApprovalRequest(Base):
             name="ck_approval_requests_pending_not_resolved",
         ),
     )
+
+
+class AuditEvent(Base):
+    """
+    一次已经真实发生的执行事实的审计记录（T023）。
+
+    审计事件只回答六个问题：发生了什么（``event_type`` / ``action``）、谁触发
+    （``actor_type``）、什么时候（``occurred_at``）、影响了哪个业务对象
+    （``affected_object_*``）、结果如何（``outcome`` / ``success``）、以及哪个
+    Tool / Approval / Decision 支撑了它（``reference_*``）。
+
+    核心身份事实全部用明确列表达，自由 JSON 只用于少量安全的结构化补充
+    （``metadata_json``）；事件类型、触发者、结果都有独立枚举或布尔列，不塞进
+    一段普通日志字符串，也不塞进 ``AgentStep.error_message``。
+
+    幂等去重由 ``business_key`` 的唯一约束兜底：它由 event_type 与 AgentRun 的
+    业务标识确定性派生，因此 API retry、Resume retry、process restart、并发
+    resume 或同一审批重试，都只会留下一条语义相同的事件，不依赖任何进程内内存
+    状态。``agent_run_id`` 使用 ON DELETE CASCADE，与 Run 的其余关联记录一致，
+    使 demo 数据重置保持可重复。
+    """
+    __tablename__ = "audit_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # 确定性事件标识：audit-<event_type>-<run_key>，与数据库唯一约束表达的是
+    # 同一条"同一 Run 同一事件类型至多一条"的业务规则。列宽 = 前缀 6 +
+    # 最长事件类型 approval_request_created 24 + 分隔符 1 + AgentRun.business_key
+    # 64，留足余量取 128。
+    business_key = Column(String(128), unique=True, nullable=False, index=True)
+    agent_run_id = Column(
+        Integer,
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    event_type = Column(
+        Enum(
+            AuditEventType,
+            name="auditeventtype",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        nullable=False,
+    )
+    actor_type = Column(
+        Enum(
+            ActorType,
+            name="actortype",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        nullable=False,
+    )
+    # 事件的具体结果语义。取值直接来自各 service 真实返回的状态值（success /
+    # unavailable / allow / approval_required / created / updated / completed ...），
+    # 因此审计记录的是事实而不是一句结论性文本。
+    outcome = Column(String(32), nullable=False)
+    # 通用"是否正向成功"标记：成功 / 放行 / 允许 / 批准 / 完成 为真，其余为假。
+    success = Column(Boolean, nullable=False)
+    # 事件发生的真实时刻。approval 事件使用决策时刻，与 ApprovalRequest.resolved_at
+    # 同一事实来源；其余事件取动作真实返回那一刻。
+    occurred_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    # 受影响业务对象的类型与稳定业务标识（order / inventory_item / replacement_order /
+    # ticket / approval_request / agent_run）。仅使用业务标识，不暴露自增主键。
+    affected_object_type = Column(String(64), nullable=True)
+    affected_object_key = Column(String(128), nullable=True)
+    # 简短的动作名，如 create_replacement / update_ticket / approve。
+    action = Column(String(128), nullable=False)
+    # 安全摘要：只包含业务标识、状态码等结构化事实，绝不写入 secrets、完整 prompt
+    # 或客户敏感信息。
+    summary = Column(Text, nullable=False)
+    # 支撑该事件的 Tool / Approval / Decision 引用。当前只对 approval 相关事件
+    # 设置 approval_key，其余事件保持 NULL（event_type 与 affected_object 已足够定位）。
+    reference_type = Column(String(32), nullable=True)
+    reference_key = Column(String(128), nullable=True)
+    # 少量安全的结构化补充，如 reason_code / rule_code / decision_reason。
+    metadata_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    agent_run = relationship("AgentRun", back_populates="audit_events")
