@@ -36,6 +36,7 @@ from inventory import InventoryCheckResult, InventoryCheckStatus, InventoryFacts
 from models import OrderStatus
 from orders import OrderFacts, OrderLookupResult, OrderLookupStatus
 from policies import PolicyLookupResult, PolicyLookupStatus, ReplacementPolicyRule
+from policy_retrieval import PolicyRetrievalResult, PolicyRetrievalStatus
 
 # 模型自述置信度的最低门槛。低于该门槛时判定降级为 ambiguous，交由人工判断，
 # 绝不因为"模型很自信"就放行，也绝不因为置信度高就跳过任何确定性规则。
@@ -52,6 +53,7 @@ def decide_replacement(
     order_result: OrderLookupResult,
     inventory_result: InventoryCheckResult,
     now: datetime | None = None,
+    retrieval: PolicyRetrievalResult | None = None,
 ) -> ReplacementDecision:
     """依据四类真实证据做出换货资格判定。
 
@@ -80,7 +82,7 @@ def decide_replacement(
 
     evidence = DecisionEvidence(
         intent=_intent_evidence(intent_outcome),
-        policy=_policy_evidence(policy_result),
+        policy=_policy_evidence(policy_result, retrieval),
         order=_order_evidence(order_result),
         inventory=_inventory_evidence(inventory_result),
     )
@@ -270,8 +272,15 @@ def _intent_evidence(intent_outcome: IntentExtractionOutcome) -> IntentEvidence:
     )
 
 
-def _policy_evidence(policy_result: PolicyLookupResult) -> PolicyEvidence:
-    """保留政策来源标识与确定性规则，使判定可追溯到具体政策来源。"""
+def _policy_evidence(
+    policy_result: PolicyLookupResult, retrieval: PolicyRetrievalResult | None = None
+) -> PolicyEvidence:
+    """保留政策来源标识与确定性规则，使判定可追溯到具体政策来源。
+
+    T025：真实 policy retrieval 返回的来源身份（document key / source reference）
+    作为 grounding 证据一并进入 evidence。它们只提供可追溯来源，不参与任何确定性
+    规则求值；规则仍来自 ``policy_result`` 的 application-owned 事实。
+    """
     if not isinstance(policy_result, PolicyLookupResult):
         return PolicyEvidence()
 
@@ -283,6 +292,16 @@ def _policy_evidence(policy_result: PolicyLookupResult) -> PolicyEvidence:
         evidence.replacement_window_days = policy_result.rule.replacement_window_days
         evidence.approval_required_above_amount = (
             policy_result.rule.approval_required_above_amount
+        )
+    if (
+        isinstance(retrieval, PolicyRetrievalResult)
+        and retrieval.status is PolicyRetrievalStatus.SUCCESS
+    ):
+        evidence.retrieved_source_references = list(
+            dict.fromkeys(p.source_reference for p in retrieval.passages)
+        )
+        evidence.retrieved_document_keys = list(
+            dict.fromkeys(p.document_key for p in retrieval.passages)
         )
     return evidence
 

@@ -244,6 +244,56 @@ watch(
           </ol>
         </section>
 
+        <section class="panel" aria-label="政策依据" data-testid="agent-run-policy-basis">
+          <h2>政策依据（Policy Basis）</h2>
+          <template v-if="agentRun.policy_basis">
+            <div class="policy-basis-header">
+              <p
+                v-if="agentRun.policy_basis.document_title"
+                class="policy-title"
+              >
+                {{ agentRun.policy_basis.document_title }}
+              </p>
+              <p
+                v-if="agentRun.policy_basis.source_reference"
+                class="policy-source"
+              >
+                来源：<code>{{ agentRun.policy_basis.source_reference }}</code>
+              </p>
+              <span
+                v-if="agentRun.policy_basis.is_demo_data"
+                class="demo-tag"
+              >
+                演示/模拟数据（Demo）
+              </span>
+            </div>
+            <ol
+              v-if="agentRun.policy_basis.passages.length"
+              class="policy-passages"
+            >
+              <li
+                v-for="passage in agentRun.policy_basis.passages"
+                :key="passage.rank"
+                class="policy-passage"
+              >
+                <div class="passage-meta">
+                  <span class="passage-rank">#{{ passage.rank }}</span>
+                  <span class="passage-score">
+                    relevance {{ (passage.score * 100).toFixed(1) }}%
+                  </span>
+                  <code class="passage-chunk">{{ passage.chunk_key }}</code>
+                </div>
+                <p class="passage-text">{{ passage.passage }}</p>
+              </li>
+            </ol>
+            <p v-else class="unavailable">本次检索没有返回可展示的政策 passage。</p>
+            <p v-if="agentRun.policy_basis.failure_reason" class="error-message">
+              政策检索失败：{{ agentRun.policy_basis.failure_reason }}
+            </p>
+          </template>
+          <p v-else class="unavailable">本次执行没有记录政策检索结果。</p>
+        </section>
+
         <section class="panel" aria-label="换货单">
           <h2>换货单</h2>
           <dl v-if="agentRun.replacement" class="facts" data-testid="agent-run-replacement">
@@ -485,6 +535,86 @@ watch(
   margin: 0;
   color: #455a64;
   font-weight: 600;
+}
+
+.policy-basis-header {
+  margin-bottom: 0.75rem;
+}
+
+.policy-title {
+  margin: 0;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.policy-source {
+  margin: 0.3rem 0 0;
+  color: #616161;
+  font-size: 0.85rem;
+}
+
+.policy-source code {
+  font-size: 0.8rem;
+  word-break: break-all;
+}
+
+.demo-tag {
+  display: inline-block;
+  margin-top: 0.4rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #8d6e00;
+  background: #fff3cd;
+  border: 1px solid #e6c94f;
+  border-radius: 4px;
+  padding: 0.15rem 0.5rem;
+}
+
+.policy-passages {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+}
+
+.policy-passage {
+  padding: 0.6rem 0;
+  border-top: 1px solid #eeeeee;
+}
+
+.policy-passage:first-child {
+  border-top: none;
+}
+
+.passage-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  font-size: 0.8rem;
+  color: #616161;
+}
+
+.passage-rank {
+  font-weight: 600;
+  color: #3949ab;
+}
+
+.passage-score {
+  font-weight: 600;
+  color: #2e7d32;
+}
+
+.passage-chunk {
+  font-size: 0.75rem;
+  word-break: break-all;
+}
+
+.passage-text {
+  margin: 0.35rem 0 0;
+  font-size: 0.88rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .timeline {

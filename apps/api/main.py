@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -267,6 +268,39 @@ class ApprovalDecisionResponse(BaseModel):
     risk: AgentRunRiskResponse
 
 
+class PolicyBasisPassageResponse(BaseModel):
+    """T025 policy retrieval 返回的一条真实 passage。
+
+    每个字段都来自真实 retrieval result（rank / score / chunk_key / chunk_order /
+    passage），前端原样展示，绝不自行生成 citation 或来源身份。
+    """
+
+    rank: int
+    score: float
+    chunk_key: str
+    chunk_order: int
+    passage: str
+
+
+class PolicyBasisResponse(BaseModel):
+    """T025 政策依据：一次真实 policy retrieval 的来源与 selected passages。
+
+    ``document_title`` / ``document_key`` / ``source_reference`` 是检索命中的
+    PolicyDocument 稳定身份，``passages`` 是被选中 passage 的安全快照。retrieval
+    失败时来源字段为 null 且 ``failure_reason`` 非空，前端据此如实展示失败，绝不
+    显示"AI 判断符合政策"这类没有来源的结论。
+    """
+
+    status: str
+    query_summary: str
+    document_key: str | None
+    document_title: str | None
+    source_reference: str | None
+    is_demo_data: bool | None
+    failure_reason: str | None
+    passages: list[PolicyBasisPassageResponse]
+
+
 class AgentRunResponse(BaseModel):
     """一次 Agent Run 的真实执行结果。
 
@@ -290,6 +324,9 @@ class AgentRunResponse(BaseModel):
     # T020：等待人工审批时那条真实落库的审批请求。它是审批语义的权威来源；
     # 未被风险门禁拦下的 Run 没有审批请求，此处为 null。
     approval_request: AgentRunApprovalRequestResponse | None
+    # T025：policy retrieval 的真实来源与 selected passages。策略检索是 Golden Path
+    # 的固定步骤，因此正常执行的 Run 都会携带它；仅在极旧历史数据缺失时为 null。
+    policy_basis: PolicyBasisResponse | None = None
 
 
 class ResumeAgentRunResponse(BaseModel):
@@ -374,6 +411,48 @@ def _risk_response(
     return _risk_view(risk)
 
 
+def _policy_basis_response(agent_run: AgentRun) -> PolicyBasisResponse | None:
+    """把持久化的 policy retrieval 记录映射为政策依据响应。
+
+    只读取真实落库的 ``AgentPolicyRetrieval``（含 selected passages 快照），不重新
+    检索、不调用模型、不补齐任何来源身份。历史数据没有检索记录时返回 None。
+    """
+    retrieval = agent_run.policy_retrieval
+    if retrieval is None:
+        return None
+
+    passages: list[PolicyBasisPassageResponse] = []
+    if retrieval.passages_json:
+        try:
+            raw = json.loads(retrieval.passages_json)
+        except (ValueError, TypeError):
+            raw = []
+        if isinstance(raw, list):
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                passages.append(
+                    PolicyBasisPassageResponse(
+                        rank=item.get("rank", 0),
+                        score=item.get("score", 0.0),
+                        chunk_key=item.get("chunk_key", ""),
+                        chunk_order=item.get("chunk_order", 0),
+                        passage=item.get("passage", ""),
+                    )
+                )
+
+    return PolicyBasisResponse(
+        status=retrieval.status,
+        query_summary=retrieval.query_summary,
+        document_key=retrieval.document_key,
+        document_title=retrieval.document_title,
+        source_reference=retrieval.source_reference,
+        is_demo_data=retrieval.is_demo_data,
+        failure_reason=retrieval.failure_reason,
+        passages=passages,
+    )
+
+
 def _agent_run_response(db: Session, agent_run: AgentRun) -> AgentRunResponse:
     """把已持久化的 Run 映射为响应模型，不做任何状态推断或补齐"""
     ticket = agent_run.ticket
@@ -391,6 +470,7 @@ def _agent_run_response(db: Session, agent_run: AgentRun) -> AgentRunResponse:
         error_message=agent_run.error_message,
         approval_request=approval_request,
         risk=_risk_response(db, agent_run, approval_request),
+        policy_basis=_policy_basis_response(agent_run),
         # 关系上已按 step_order 排序，时间线顺序即真实执行顺序
         steps=[
             AgentStepResponse(

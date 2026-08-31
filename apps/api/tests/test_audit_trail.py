@@ -49,8 +49,10 @@ HIGH_VALUE_TICKET_KEY = "ticket-demo-002"
 
 AVAILABLE_SKU = "SKU-EARBUD-PRO-01"
 
-# 低风险 Golden Path 的真实审计事件顺序（与 Golden Path 执行顺序一致）
+# 低风险 Golden Path 的真实审计事件顺序（与 Golden Path 执行顺序一致；
+# policy_retrieved 是 T025 的检索步骤，发生在 get_order 之前）
 LOW_RISK_EVENT_ORDER = [
+    "policy_retrieved",
     "get_order",
     "check_inventory",
     "decision_produced",
@@ -62,6 +64,7 @@ LOW_RISK_EVENT_ORDER = [
 
 # 高风险 pending 的审计事件顺序（被风险门禁拦下，换货未发生）
 HIGH_RISK_PENDING_EVENT_ORDER = [
+    "policy_retrieved",
     "get_order",
     "check_inventory",
     "decision_produced",
@@ -163,6 +166,8 @@ def test_low_risk_golden_path_audit_timeline():
     assert _event_types(events) == LOW_RISK_EVENT_ORDER
 
     by_type = _by_type(events)
+    assert by_type["policy_retrieved"]["outcome"] == "success"
+    assert by_type["policy_retrieved"]["success"] is True
     assert by_type["decision_produced"]["outcome"] == "eligible"
     assert by_type["decision_produced"]["success"] is True
     assert by_type["get_order"]["outcome"] == "success"
@@ -185,6 +190,8 @@ def test_low_risk_audit_references_affected_objects():
     events = _audit_events_via_api(run_key)
     by_type = _by_type(events)
 
+    assert by_type["policy_retrieved"]["affected_object_type"] == "agent_run"
+    assert by_type["policy_retrieved"]["affected_object_key"] == run_key
     assert by_type["get_order"]["affected_object_type"] == "order"
     assert by_type["get_order"]["affected_object_key"] == "order-demo-001"
     assert by_type["check_inventory"]["affected_object_type"] == "inventory_item"
@@ -305,6 +312,7 @@ def test_approved_resume_produces_incremental_execution_audit():
 
     events = _audit_events_via_api(run_key)
     assert _event_types(events) == [
+        "policy_retrieved",
         "get_order",
         "check_inventory",
         "decision_produced",
@@ -346,6 +354,7 @@ def test_tool_failure_audit_records_failure_not_success():
     events = _audit_events_via_api(run_key)
 
     assert _event_types(events) == [
+        "policy_retrieved",
         "get_order",
         "check_inventory",
         "agent_run_outcome",
@@ -457,7 +466,7 @@ def test_audit_events_queryable_in_brand_new_session():
     rows = _audit_rows(run_key)
 
     assert [row.event_type.value for row in rows] == LOW_RISK_EVENT_ORDER
-    assert len(rows) == 7
+    assert len(rows) == 8
 
 
 def test_audit_order_is_deterministic():

@@ -34,6 +34,27 @@ export interface AgentRunTicketResult {
   replacement_key: string | null
 }
 
+/** T025 policy retrieval 返回的一条真实 passage，全部来自后端 retrieval result */
+export interface PolicyBasisPassage {
+  rank: number
+  score: number
+  chunk_key: string
+  chunk_order: number
+  passage: string
+}
+
+/** T025 政策依据：真实 policy retrieval 的来源与 selected passages */
+export interface PolicyBasis {
+  status: string
+  query_summary: string
+  document_key: string | null
+  document_title: string | null
+  source_reference: string | null
+  is_demo_data: boolean | null
+  failure_reason: string | null
+  passages: PolicyBasisPassage[]
+}
+
 export interface AgentRunRecord {
   business_key: string
   ticket_key: string
@@ -45,6 +66,7 @@ export interface AgentRunRecord {
   steps: AgentRunStep[]
   replacement: AgentRunReplacement | null
   ticket_result: AgentRunTicketResult
+  policy_basis: PolicyBasis | null
 }
 
 const TICKETS_ENDPOINT = 'http://localhost:8000/tickets'
@@ -105,6 +127,38 @@ function isAgentRunTicketResult(value: unknown): value is AgentRunTicketResult {
   )
 }
 
+function isPolicyBasisPassage(value: unknown): value is PolicyBasisPassage {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.rank === 'number' &&
+    typeof record.score === 'number' &&
+    typeof record.chunk_key === 'string' &&
+    typeof record.chunk_order === 'number' &&
+    typeof record.passage === 'string'
+  )
+}
+
+function isPolicyBasis(value: unknown): value is PolicyBasis {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.status === 'string' &&
+    typeof record.query_summary === 'string' &&
+    isNullableString(record.document_key) &&
+    isNullableString(record.document_title) &&
+    isNullableString(record.source_reference) &&
+    (typeof record.is_demo_data === 'boolean' || record.is_demo_data === null) &&
+    isNullableString(record.failure_reason) &&
+    Array.isArray(record.passages) &&
+    record.passages.every(isPolicyBasisPassage)
+  )
+}
+
 function isAgentRunRecord(value: unknown): value is AgentRunRecord {
   if (typeof value !== 'object' || value === null) {
     return false
@@ -121,7 +175,8 @@ function isAgentRunRecord(value: unknown): value is AgentRunRecord {
     Array.isArray(record.steps) &&
     record.steps.every(isAgentRunStep) &&
     (record.replacement === null || isAgentRunReplacement(record.replacement)) &&
-    isAgentRunTicketResult(record.ticket_result)
+    isAgentRunTicketResult(record.ticket_result) &&
+    (record.policy_basis === null || isPolicyBasis(record.policy_basis))
   )
 }
 

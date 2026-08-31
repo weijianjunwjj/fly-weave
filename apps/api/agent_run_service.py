@@ -31,6 +31,7 @@
 标记，风险门禁独立基于执行时持久化事实重新求值，本模块仍不因它暂停、分流或
 拒绝执行。
 """
+import json
 from datetime import datetime
 
 from sqlalchemy.exc import IntegrityError
@@ -58,6 +59,7 @@ from inventory_service import (
 )
 from models import (
     ActorType,
+    AgentPolicyRetrieval,
     AgentRun,
     AgentRunStatus,
     AgentStep,
@@ -70,6 +72,13 @@ from models import (
 from order_service import get_order
 from orders import GetOrderRequest, OrderLookupStatus
 from policies import PolicyLookupStatus
+from policy_retrieval import (
+    PolicyRetrievalQuery,
+    PolicyRetrievalResult,
+    PolicyRetrievalStatus,
+    query_for_intent,
+)
+from policy_retrieval_service import retrieve_policy_passages
 from policy_service import lookup_replacement_policy
 from replacement_service import REPLACEMENT_STEP_NAME, create_replacement
 from replacements import CreateReplacementRequest, CreateReplacementStatus
@@ -106,6 +115,11 @@ _MAX_RUN_KEY_ATTEMPTS = 5
 
 # 回写工单的结果摘要列宽，与 UpdateTicketRequest.summary 保持一致
 _MAX_SUMMARY_LENGTH = 1000
+
+# T025：policy retrieval 记录中 issue 摘要与 passage 快照的截断长度，防止超长文本
+# 撑爆列，同时只保存安全摘要、不伪造任何 score/token 等不存在的元数据。
+_MAX_QUERY_SUMMARY_ISSUE = 200
+_MAX_PASSAGE_SNAPSHOT = 500
 
 
 class AgentRunNotFoundError(Exception):
@@ -174,18 +188,42 @@ def _execute(
         )
     intent = intent_outcome.intent
 
-    # --- 步骤 2：检索售后政策（T012） ---
+    # --- 步骤 2：检索政策依据（T012 确定性 lookup + T025 真实 retrieval） ---
+    # 两条路径都必须成功：T012 提供 deterministic replacement_window_days / approval
+    # threshold 等结构化事实，T025 提供真实 retrieved passages 与 source references
+    # 作为 grounding。任一失败都 fail closed，绝不 fallback 成"肯定允许换货"。
+    retrieval_query = _build_retrieval_query(intent, ticket)
+    retrieval_result = retrieve_policy_passages(db, retrieval_query)
     policy_result = lookup_replacement_policy(db, intent)
     policy_ok = policy_result.status is PolicyLookupStatus.SUCCESS
+    retrieval_ok = retrieval_result.status is PolicyRetrievalStatus.SUCCESS
+
+    # T025：把真实 retrieval 结果持久化为可检查的 Agent step 记录，并接入审计。
+    _persist_policy_retrieval(db, agent_run, retrieval_query, retrieval_result)
+    record_audit_event(
+        db,
+        agent_run=agent_run,
+        event_type=AuditEventType.POLICY_RETRIEVED,
+        actor_type=ActorType.AGENT,
+        outcome=retrieval_result.status.value,
+        success=retrieval_ok,
+        action="retrieve_policy_passages",
+        summary=_retrieval_audit_summary(retrieval_result),
+        affected_object_type="agent_run",
+        affected_object_key=agent_run.business_key,
+        metadata=_retrieval_audit_metadata(retrieval_result),
+    )
+
+    step_ok = policy_ok and retrieval_ok
     _record_step(
         db,
         agent_run,
         POLICY_STEP_ORDER,
         POLICY_STEP_NAME,
-        policy_ok,
+        step_ok,
         None
-        if policy_ok
-        else _tool_failure(policy_result.status.value, policy_result.failure_reason),
+        if step_ok
+        else _policy_step_failure(policy_result, retrieval_result),
     )
     if not policy_ok:
         return _fail_run(
@@ -195,6 +233,16 @@ def _execute(
                 POLICY_STEP_NAME,
                 policy_result.status.value,
                 policy_result.failure_reason,
+            ),
+        )
+    if not retrieval_ok:
+        return _fail_run(
+            db,
+            agent_run,
+            _step_failure(
+                POLICY_STEP_NAME,
+                retrieval_result.status.value,
+                retrieval_result.failure_reason,
             ),
         )
 
@@ -283,7 +331,11 @@ def _execute(
 
     # --- 步骤 5：评估换货资格（T015） ---
     decision = decide_replacement(
-        intent_outcome, policy_result, order_result, inventory_result
+        intent_outcome,
+        policy_result,
+        order_result,
+        inventory_result,
+        retrieval=retrieval_result,
     )
     decision_ok = decision.status is ReplacementDecisionStatus.ELIGIBLE
     # T023：结构化换货判定已真实产生，结果与理由码直接来自 decision，不重新推导。
@@ -409,6 +461,128 @@ def _build_order_request(ticket: Ticket) -> GetOrderRequest | None:
         return GetOrderRequest(order_key=order.business_key)
     except ValueError:
         return None
+
+
+def _build_retrieval_query(
+    intent: ReplacementIntent, ticket: Ticket
+) -> PolicyRetrievalQuery:
+    """用已验证 intent 与工单关联的订单上下文构造 retrieval query。
+
+    query 只由已验证 typed 上下文构造：intent 来自 T011 的 validation boundary，
+    product context 来自工单关联的真实订单事实，绝不使用模型自由文本。
+    """
+    order = ticket.order
+    return query_for_intent(
+        intent,
+        product_sku=order.product_sku if order is not None else None,
+        product_name=order.product_name if order is not None else None,
+    )
+
+
+def _persist_policy_retrieval(
+    db: Session,
+    agent_run: AgentRun,
+    query: PolicyRetrievalQuery,
+    result: PolicyRetrievalResult,
+) -> AgentPolicyRetrieval:
+    """把真实 policy retrieval 结果以类型化字段落库（每 Run 至多一条）。
+
+    成功时记录返回的 PolicyDocument 身份与 selected passages 快照；失败时记录
+    结构化失败原因，来源相关列保持 NULL，不伪造任何来源身份。
+    """
+    persisted = (
+        db.query(AgentPolicyRetrieval)
+        .filter(AgentPolicyRetrieval.agent_run_id == agent_run.id)
+        .one_or_none()
+    )
+    if persisted is None:
+        persisted = AgentPolicyRetrieval(agent_run_id=agent_run.id)
+        db.add(persisted)
+
+    persisted.status = result.status.value
+    persisted.query_summary = _retrieval_query_summary(query)
+    persisted.failure_reason = result.failure_reason
+
+    if result.status is PolicyRetrievalStatus.SUCCESS and result.passages:
+        first = result.passages[0]
+        persisted.document_key = first.document_key
+        persisted.document_title = first.document_title
+        persisted.source_reference = first.source_reference
+        persisted.is_demo_data = first.is_demo_data
+        persisted.passages_json = _dump_retrieval_passages(result.passages)
+    else:
+        persisted.document_key = None
+        persisted.document_title = None
+        persisted.source_reference = None
+        persisted.is_demo_data = None
+        persisted.passages_json = None
+    return persisted
+
+
+def _retrieval_query_summary(query: PolicyRetrievalQuery) -> str:
+    """把 retrieval query 编码为安全摘要（issue 截断，不写入完整敏感文本）。"""
+    parts = [
+        f"intent_type={query.intent_type.value}",
+        f"requested_action={query.requested_action.value}",
+    ]
+    issue = (query.issue_summary or "").strip()
+    if issue:
+        parts.append(f"issue={issue[:_MAX_QUERY_SUMMARY_ISSUE]}")
+    if query.product_sku:
+        parts.append(f"product_sku={query.product_sku}")
+    return "; ".join(parts)
+
+
+def _dump_retrieval_passages(passages) -> str | None:
+    """把 selected passages 序列化为安全 JSON 快照（passage 截断，不伪造元数据）。"""
+    payload = [
+        {
+            "rank": passage.rank,
+            "score": passage.score,
+            "chunk_key": passage.chunk_key,
+            "chunk_order": passage.chunk_order,
+            "passage": passage.passage[:_MAX_PASSAGE_SNAPSHOT],
+        }
+        for passage in passages
+    ]
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _retrieval_audit_summary(result: PolicyRetrievalResult) -> str:
+    """把 retrieval 的真实结果编码为审计摘要（只含结构化事实，不含敏感文本）。"""
+    if result.status is PolicyRetrievalStatus.SUCCESS and result.passages:
+        first = result.passages[0]
+        return (
+            f"政策检索: status=success document={first.document_key} "
+            f"passages={len(result.passages)}"
+        )
+    return f"政策检索: status={result.status.value}"
+
+
+def _retrieval_audit_metadata(result: PolicyRetrievalResult) -> dict | None:
+    """把 retrieval 的来源身份编码为审计 metadata（只含稳定标识）。"""
+    if result.status is PolicyRetrievalStatus.SUCCESS and result.passages:
+        first = result.passages[0]
+        return {
+            "document_key": first.document_key,
+            "source_reference": first.source_reference,
+            "passage_count": len(result.passages),
+        }
+    return None
+
+
+def _policy_step_failure(
+    policy_result, retrieval_result: PolicyRetrievalResult
+) -> str:
+    """把 policy 步骤的真实失败结果编码成步骤级别的结构化失败原因。"""
+    parts: list[str] = []
+    if policy_result.status is not PolicyLookupStatus.SUCCESS:
+        parts.append(f"lookup_status={policy_result.status.value}")
+    if retrieval_result.status is not PolicyRetrievalStatus.SUCCESS:
+        parts.append(f"retrieval_status={retrieval_result.status.value}")
+    if retrieval_result.failure_reason:
+        parts.append(f"retrieval_reason={retrieval_result.failure_reason}")
+    return "; ".join(parts)
 
 
 def _create_agent_run(db: Session, ticket: Ticket) -> AgentRun:
@@ -639,6 +813,16 @@ def _reconstruct_resume_context(db: Session, agent_run: AgentRun):
     inventory_result = check_inventory(
         db, CheckInventoryRequest(product_sku=order_result.order.product_sku)
     )
+    # 恢复执行同样基于真实 policy retrieval 重建 grounding 证据，使 decision 的
+    # evidence 与初次执行保持一致；retrieval 失败也不改变确定性规则（证据缺省）。
+    retrieval_result = retrieve_policy_passages(
+        db,
+        query_for_intent(
+            intent,
+            product_sku=order.product_sku,
+            product_name=order.product_name,
+        ),
+    )
     decision = decide_replacement(
         IntentExtractionOutcome(
             status=IntentExtractionStatus.SUCCESS, intent=intent
@@ -646,6 +830,7 @@ def _reconstruct_resume_context(db: Session, agent_run: AgentRun):
         policy_result,
         order_result,
         inventory_result,
+        retrieval=retrieval_result,
     )
     return intent, order_result.order, policy_result.source.policy_key, decision
 

@@ -88,6 +88,7 @@ class AuditEventType(PyEnum):
     审计事件，绝不记录尚未真实发生的事。
     """
 
+    POLICY_RETRIEVED = "policy_retrieved"
     DECISION_PRODUCED = "decision_produced"
     GET_ORDER = "get_order"
     CHECK_INVENTORY = "check_inventory"
@@ -373,6 +374,13 @@ class AgentRun(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+    # T025：一次 Run 至多关联一条 policy retrieval 的实际执行记录
+    policy_retrieval = relationship(
+        "AgentPolicyRetrieval",
+        back_populates="agent_run",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
     # T016：一次 Run 至多执行一次换货这一受保护的业务变更
     replacement = relationship(
         "ReplacementOrder",
@@ -493,6 +501,51 @@ class AgentInventoryCheck(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     agent_run = relationship("AgentRun", back_populates="inventory_check")
+
+
+class AgentPolicyRetrieval(Base):
+    """policy retrieval 的真实执行记录（T025）。
+
+    与 AgentIntent / AgentInventoryCheck 同一思路：把一次真实 policy retrieval
+    的结果以类型化字段落库，关联到产生它的 AgentRun。只有真实执行过的检索才会被
+    写入本表，记录的内容全部来自 ``PolicyRetrievalResult``：
+
+    - ``status`` / ``query_summary`` / ``failure_reason``：检索状态与失败原因；
+    - ``document_key`` / ``document_title`` / ``source_reference``：返回的
+      PolicyDocument 稳定来源身份；
+    - ``passages_json``：selected passages 的安全快照（rank / score / chunk_key /
+      passage），全部来自真实 retrieval result，不伪造 score / token 等不存在的
+      元数据。
+
+    每次 Run 至多一条（agent_run_id 唯一），并随 Run 的删除一并清理。失败时
+    document / source / passages 相关列保持 NULL，不伪造来源身份。
+    """
+    __tablename__ = "agent_policy_retrievals"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    agent_run_id = Column(
+        Integer,
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    # 检索结果状态：success / no_relevant_policy / corpus_unavailable /
+    # malformed_query / unsupported_query / retrieval_failure
+    status = Column(String(32), nullable=False)
+    # 检索 query 的安全摘要（intent_type / requested_action / issue_summary 截断）
+    query_summary = Column(Text, nullable=False)
+    # 返回的 PolicyDocument 稳定来源身份；失败时为 NULL，不伪造来源
+    document_key = Column(String(128), nullable=True)
+    document_title = Column(String(128), nullable=True)
+    source_reference = Column(String(256), nullable=True)
+    is_demo_data = Column(Boolean, nullable=True)
+    failure_reason = Column(Text, nullable=True)
+    # selected passages 的安全 JSON 快照
+    passages_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    agent_run = relationship("AgentRun", back_populates="policy_retrieval")
 
 
 class ReplacementOrder(Base):

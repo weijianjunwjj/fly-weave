@@ -110,13 +110,22 @@ class IntentEvidence(BaseModel):
 
 
 class PolicyEvidence(BaseModel):
-    """政策证据（T012）。保留稳定来源标识，使判定可追溯到具体政策来源。"""
+    """政策证据（T012 / T025）。保留稳定来源标识，使判定可追溯到具体政策来源。
+
+    ``source_reference`` 是 deterministic lookup（AfterSalesPolicy）的来源定位符；
+    ``retrieved_source_references`` / ``retrieved_document_keys`` 是 T025 policy
+    retrieval 返回的真实来源身份，全部来自真实 retrieval result，不由模型编造。
+    检索只提供 grounding 来源，不改变任何确定性规则：``replacement_window_days``
+    与 ``approval_required_above_amount`` 仍来自 application-owned 事实。
+    """
 
     status: PolicyLookupStatus | None = None
     policy_key: str | None = None
     source_reference: str | None = None
     replacement_window_days: int | None = None
     approval_required_above_amount: Decimal | None = None
+    retrieved_source_references: list[str] = Field(default_factory=list)
+    retrieved_document_keys: list[str] = Field(default_factory=list)
 
 
 class OrderEvidence(BaseModel):
