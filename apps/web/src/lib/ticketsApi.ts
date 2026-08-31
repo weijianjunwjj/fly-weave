@@ -98,7 +98,7 @@ function isOrderContext(value: unknown): value is TicketOrderContext {
   )
 }
 
-function isTicketDetailRecord(value: unknown): value is TicketDetailRecord {
+export function isTicketDetailRecord(value: unknown): value is TicketDetailRecord {
   if (!isTicketRecord(value)) {
     return false
   }

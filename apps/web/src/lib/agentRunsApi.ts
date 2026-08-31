@@ -55,6 +55,27 @@ export interface PolicyBasis {
   passages: PolicyBasisPassage[]
 }
 
+export interface AgentRunRisk {
+  action: string
+  level: string
+  rule_code: string
+  requires_approval: boolean
+  reason: string
+  order_key: string | null
+  order_amount: string | null
+  approval_threshold_amount: string | null
+  policy_key: string | null
+}
+
+export interface AgentRunApprovalRequest {
+  approval_key: string
+  status: string
+  protected_action: string
+  created_at: string
+  resolved_at: string | null
+  risk: AgentRunRisk
+}
+
 export interface AgentRunRecord {
   business_key: string
   ticket_key: string
@@ -67,6 +88,8 @@ export interface AgentRunRecord {
   replacement: AgentRunReplacement | null
   ticket_result: AgentRunTicketResult
   policy_basis: PolicyBasis | null
+  risk: AgentRunRisk | null
+  approval_request: AgentRunApprovalRequest | null
 }
 
 const TICKETS_ENDPOINT = 'http://localhost:8000/tickets'
@@ -159,6 +182,35 @@ function isPolicyBasis(value: unknown): value is PolicyBasis {
   )
 }
 
+export function isAgentRunRisk(value: unknown): value is AgentRunRisk {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.action === 'string' &&
+    typeof record.level === 'string' &&
+    typeof record.rule_code === 'string' &&
+    typeof record.requires_approval === 'boolean' &&
+    typeof record.reason === 'string' &&
+    isNullableString(record.order_key) &&
+    isNullableString(record.order_amount) &&
+    isNullableString(record.approval_threshold_amount) &&
+    isNullableString(record.policy_key)
+  )
+}
+
+function isAgentRunApprovalRequest(value: unknown): value is AgentRunApprovalRequest {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.approval_key === 'string' &&
+    typeof record.status === 'string' &&
+    typeof record.protected_action === 'string' &&
+    typeof record.created_at === 'string' &&
+    isNullableString(record.resolved_at) &&
+    isAgentRunRisk(record.risk)
+  )
+}
+
 function isAgentRunRecord(value: unknown): value is AgentRunRecord {
   if (typeof value !== 'object' || value === null) {
     return false
@@ -176,11 +228,13 @@ function isAgentRunRecord(value: unknown): value is AgentRunRecord {
     record.steps.every(isAgentRunStep) &&
     (record.replacement === null || isAgentRunReplacement(record.replacement)) &&
     isAgentRunTicketResult(record.ticket_result) &&
-    (record.policy_basis === null || isPolicyBasis(record.policy_basis))
+    (record.policy_basis === null || isPolicyBasis(record.policy_basis)) &&
+    (record.risk === null || isAgentRunRisk(record.risk)) &&
+    (record.approval_request === null || isAgentRunApprovalRequest(record.approval_request))
   )
 }
 
-function parseAgentRun(data: unknown): AgentRunRecord {
+export function parseAgentRun(data: unknown): AgentRunRecord {
   if (!isAgentRunRecord(data)) {
     throw new Error('Agent Run 接口返回了非预期的数据结构')
   }

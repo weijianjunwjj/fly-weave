@@ -23,7 +23,7 @@ from approval_service import approval_record, get_approval_request, get_pending_
 from approvals import ApprovalRequestStatus
 from config import settings
 from database import get_db
-from models import AgentRun, AgentRunStatus, AuditEvent, Ticket
+from models import AgentRun, AgentRunStatus, ApprovalRequest, AuditEvent, Ticket
 from risk_service import assess_persisted_replacement_risk
 
 
@@ -329,6 +329,19 @@ class AgentRunResponse(BaseModel):
     policy_basis: PolicyBasisResponse | None = None
 
 
+class ApprovalInboxItemResponse(BaseModel):
+    """审批工作台的一条真实聚合视图。
+
+    审批、Run、Ticket 与 Policy Basis 均直接映射既有持久化实体；本响应只为
+    Approval Inbox 减少前端 N+1 请求，不创建第二套审批状态或执行生命周期。
+    """
+
+    approval: ApprovalDecisionResponse
+    created_at: datetime
+    ticket: TicketDetailResponse
+    agent_run: AgentRunResponse
+
+
 class ResumeAgentRunResponse(BaseModel):
     """T022 恢复执行的响应：本次 Run 的真实终态 + 授权它的那条审批请求。
 
@@ -518,6 +531,78 @@ def _require_ticket(db: Session, business_key: str) -> Ticket:
     if ticket is None:
         raise HTTPException(status_code=404, detail=f"未找到工单: {business_key}")
     return ticket
+
+
+@app.get(
+    "/approval-requests",
+    response_model=list[ApprovalInboxItemResponse],
+)
+async def list_approval_requests(
+    db: Session = Depends(get_db),
+) -> list[ApprovalInboxItemResponse]:
+    """返回 Approval Inbox 所需的真实审批记录，包含已决策历史。
+
+    排序以审批创建时间和数据库 id 倒序确定。状态、风险快照、Run 结果、工单结果
+    与政策依据都来自既有持久化模型；这里不重算风险，也不补造执行或审计事实。
+    """
+
+    approvals = (
+        db.query(ApprovalRequest)
+        .options(
+            joinedload(ApprovalRequest.agent_run)
+            .joinedload(AgentRun.ticket)
+            .joinedload(Ticket.customer),
+            joinedload(ApprovalRequest.agent_run)
+            .joinedload(AgentRun.ticket)
+            .joinedload(Ticket.order),
+        )
+        .order_by(ApprovalRequest.created_at.desc(), ApprovalRequest.id.desc())
+        .all()
+    )
+
+    items: list[ApprovalInboxItemResponse] = []
+    for approval in approvals:
+        run = approval.agent_run
+        ticket = run.ticket
+        customer = ticket.customer
+        order = ticket.order
+        items.append(
+            ApprovalInboxItemResponse(
+                approval=_approval_decision_view(approval_record(approval)),
+                created_at=approval.created_at,
+                ticket=TicketDetailResponse(
+                    business_key=ticket.business_key,
+                    subject=ticket.subject,
+                    description=ticket.description,
+                    status=ticket.status.value,
+                    demo_scenario=ticket.demo_scenario,
+                    is_demo_data=ticket.is_demo_data,
+                    created_at=ticket.created_at,
+                    customer=CustomerContextResponse(
+                        business_key=customer.business_key,
+                        name=customer.name,
+                        email=customer.email,
+                        phone=customer.phone,
+                        is_demo_data=customer.is_demo_data,
+                    )
+                    if customer is not None
+                    else None,
+                    order=OrderContextResponse(
+                        business_key=order.business_key,
+                        product_sku=order.product_sku,
+                        product_name=order.product_name,
+                        purchased_at=order.purchased_at,
+                        status=order.status.value,
+                        amount=str(order.amount),
+                        is_demo_data=order.is_demo_data,
+                    )
+                    if order is not None
+                    else None,
+                ),
+                agent_run=_agent_run_response(db, run),
+            )
+        )
+    return items
 
 
 @app.post(
