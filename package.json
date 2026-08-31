@@ -9,7 +9,14 @@
     "dev": "npm run dev -w @flyweave/web",
     "build": "npm run build -w @flyweave/web",
     "typecheck": "npm run typecheck -w @flyweave/web",
-    "preview": "npm run preview -w @flyweave/web"
+    "preview": "npm run preview -w @flyweave/web",
+    "dev:web": "npm run dev -w @flyweave/web",
+    "dev:api": "node scripts/dev.mjs api",
+    "dev:db": "node scripts/dev.mjs db",
+    "dev:migrate": "node scripts/dev.mjs migrate",
+    "dev:seed": "node scripts/dev.mjs seed",
+    "dev:check": "node scripts/dev.mjs check",
+    "dev:all": "node scripts/dev.mjs all"
   },
   "engines": {
     "node": ">=18.0.0",

@@ -33,7 +33,7 @@ app = FastAPI(title=settings.app_name)
 # POST 是 T018 启动 Agent Run 所需：整条流程由一次真实的后端请求驱动。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )

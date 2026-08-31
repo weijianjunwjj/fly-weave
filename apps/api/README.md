@@ -2,6 +2,9 @@
 
 最小 FastAPI 后端应用。
 
+完整首次安装、数据库、seed 与统一启动入口见[根目录 Development](../../README.md#development--本地开发)。
+日常从仓库根目录执行 `npm run dev:all`；仅后端为 `npm run dev:api`，验证为 `npm run dev:check`。
+
 ## 前置要求
 
 - Python 3.11+
