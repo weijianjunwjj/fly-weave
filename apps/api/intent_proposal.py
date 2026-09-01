@@ -29,6 +29,10 @@ REPLACEMENT_DEMO_SCENARIOS: frozenset[str] = frozenset(
     {"low_risk", "approval_required", "rejected"}
 )
 
+# 正式 Ticket Intake 使用的最小业务分类。它是用户明确选择并持久化的事实，
+# 与 demo_scenario 分离，不把生产工单伪装成演示场景。
+REPLACEMENT_ISSUE_TYPES: frozenset[str] = frozenset({"商品损坏", "换货"})
+
 # 确定性提案的置信度。这不是模型的自述置信度，而是"本次提案没有猜测成分"这一
 # 事实：候选的每个字段都直接来自持久化工单。后续换成真实模型时，该值必须改为
 # 模型实际给出的置信度。
@@ -43,7 +47,9 @@ def propose_replacement_intent(ticket: Ticket) -> str | None:
     """
     if not isinstance(ticket, Ticket):
         return None
-    if ticket.demo_scenario not in REPLACEMENT_DEMO_SCENARIOS:
+    is_supported_demo = ticket.demo_scenario in REPLACEMENT_DEMO_SCENARIOS
+    is_supported_intake = ticket.issue_type in REPLACEMENT_ISSUE_TYPES
+    if not is_supported_demo and not is_supported_intake:
         return None
 
     issue_summary = (ticket.description or "").strip()

@@ -269,6 +269,8 @@ class Ticket(Base):
     customer_id = Column(Integer, ForeignKey("customers.id"), nullable=False)
     order_id = Column(Integer, ForeignKey("orders.id"), nullable=True)
     subject = Column(String(128), nullable=False)
+    # 正式 Intake 的最小业务分类；历史 seeded 工单可保持为空并沿用 demo_scenario。
+    issue_type = Column(String(32), nullable=True)
     description = Column(Text, nullable=False)
     status = Column(
         Enum(TicketStatus, name="ticketstatus", values_callable=lambda enum_cls: [member.value for member in enum_cls]),
@@ -279,6 +281,13 @@ class Ticket(Base):
     demo_scenario = Column(String(32), nullable=True)
     is_demo_data = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    # 每次工单领域状态被真实更新时由 ORM 刷新；新建工单初始值等于 created_at。
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
 
     # --- T017：update_ticket 回写的解决结果 ---
     # 四个字段共同表示"这张工单已被一次真实执行解决"。未解决的工单一律保持

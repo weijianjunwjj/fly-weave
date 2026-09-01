@@ -1,9 +1,11 @@
 import json
 from datetime import datetime
+from decimal import Decimal
+from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session, joinedload
 
 from agent_run_service import (
@@ -19,12 +21,17 @@ from approval_decision_service import (
     approve,
     reject,
 )
-from approval_service import approval_record, get_approval_request, get_pending_approval
+from approval_service import approval_record, get_approval_request
 from approvals import ApprovalRequestStatus
 from config import settings
 from database import get_db
 from models import AgentRun, AgentRunStatus, ApprovalRequest, AuditEvent, Ticket
 from risk_service import assess_persisted_replacement_risk
+from ticket_intake_service import (
+    DuplicateOrderError,
+    IntakeProductUnavailableError,
+    create_ticket,
+)
 
 
 app = FastAPI(title=settings.app_name)
@@ -57,32 +64,68 @@ async def health_check() -> HealthResponse:
 
 
 class TicketResponse(BaseModel):
-    """工单只读响应模型"""
+    """Service Operations 工单列表使用的真实聚合视图。"""
     business_key: str
     subject: str
+    issue_type: str | None
     description: str
     status: str
     demo_scenario: str | None
     is_demo_data: bool
     created_at: datetime
+    updated_at: datetime
+    customer_name: str | None
+    order_key: str | None
+    order_amount: str | None
+    agent_run_key: str | None
+    agent_run_status: str | None
+    risk_level: str | None
 
 
 @app.get("/tickets", response_model=list[TicketResponse])
 async def list_tickets(db: Session = Depends(get_db)) -> list[TicketResponse]:
-    """返回已持久化的工单，按创建时间排序"""
-    tickets = db.query(Ticket).order_by(Ticket.created_at.asc()).all()
-    return [
-        TicketResponse(
-            business_key=ticket.business_key,
-            subject=ticket.subject,
-            description=ticket.description,
-            status=ticket.status.value,
-            demo_scenario=ticket.demo_scenario,
-            is_demo_data=ticket.is_demo_data,
-            created_at=ticket.created_at,
+    """返回产品工作台所需的持久化工单、最新 Run 与真实风险状态。"""
+    tickets = (
+        db.query(Ticket)
+        .options(
+            joinedload(Ticket.customer),
+            joinedload(Ticket.order),
+            joinedload(Ticket.agent_runs),
         )
-        for ticket in tickets
-    ]
+        .order_by(Ticket.updated_at.desc(), Ticket.id.desc())
+        .all()
+    )
+    responses: list[TicketResponse] = []
+    for ticket in tickets:
+        latest_run = (
+            max(ticket.agent_runs, key=lambda run: run.id)
+            if ticket.agent_runs
+            else None
+        )
+        risk = None
+        if latest_run is not None:
+            pending = _approval_request_response(db, latest_run)
+            risk = _risk_response(db, latest_run, pending)
+        responses.append(
+            TicketResponse(
+                business_key=ticket.business_key,
+                subject=ticket.subject,
+                issue_type=ticket.issue_type,
+                description=ticket.description,
+                status=ticket.status.value,
+                demo_scenario=ticket.demo_scenario,
+                is_demo_data=ticket.is_demo_data,
+                created_at=ticket.created_at,
+                updated_at=ticket.updated_at,
+                customer_name=ticket.customer.name if ticket.customer is not None else None,
+                order_key=ticket.order.business_key if ticket.order is not None else None,
+                order_amount=str(ticket.order.amount) if ticket.order is not None else None,
+                agent_run_key=latest_run.business_key if latest_run is not None else None,
+                agent_run_status=latest_run.status.value if latest_run is not None else None,
+                risk_level=risk.level if risk is not None else None,
+            )
+        )
+    return responses
 
 
 class CustomerContextResponse(BaseModel):
@@ -110,11 +153,13 @@ class TicketDetailResponse(BaseModel):
     """工单详情只读响应模型，含关联的客户与订单上下文"""
     business_key: str
     subject: str
+    issue_type: str | None
     description: str
     status: str
     demo_scenario: str | None
     is_demo_data: bool
     created_at: datetime
+    updated_at: datetime
     customer: CustomerContextResponse | None
     order: OrderContextResponse | None
 
@@ -140,11 +185,13 @@ async def get_ticket_detail(
     return TicketDetailResponse(
         business_key=ticket.business_key,
         subject=ticket.subject,
+        issue_type=ticket.issue_type,
         description=ticket.description,
         status=ticket.status.value,
         demo_scenario=ticket.demo_scenario,
         is_demo_data=ticket.is_demo_data,
         created_at=ticket.created_at,
+        updated_at=ticket.updated_at,
         customer=CustomerContextResponse(
             business_key=customer.business_key,
             name=customer.name,
@@ -165,6 +212,88 @@ async def get_ticket_detail(
         )
         if order is not None
         else None,
+    )
+
+
+class CreateTicketRequest(BaseModel):
+    """正式工单受理输入；字段只映射现有 Customer、Order 与 Ticket。"""
+
+    customer_name: str = Field(min_length=1, max_length=128)
+    customer_email: str = Field(min_length=3, max_length=255)
+    issue_type: Literal["商品损坏", "换货"]
+    issue_description: str = Field(min_length=1, max_length=4000)
+    order_id: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$",
+    )
+    order_amount: Decimal = Field(gt=0, max_digits=10, decimal_places=2)
+
+    @field_validator("customer_name", "issue_description", "order_id")
+    @classmethod
+    def reject_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("字段不得为空白")
+        return value.strip()
+
+    @field_validator("customer_email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        normalized = value.strip()
+        if "@" not in normalized or " " in normalized:
+            raise ValueError("请输入有效邮箱")
+        return normalized
+
+
+@app.post("/tickets", response_model=TicketDetailResponse, status_code=201)
+async def create_ticket_endpoint(
+    body: CreateTicketRequest, db: Session = Depends(get_db)
+) -> TicketDetailResponse:
+    """通过真实事务创建 Customer、Order 与 Ticket，刷新后仍可查询。"""
+
+    try:
+        ticket = create_ticket(
+            db,
+            customer_name=body.customer_name,
+            customer_email=body.customer_email,
+            issue_type=body.issue_type,
+            issue_description=body.issue_description,
+            order_key=body.order_id,
+            order_amount=body.order_amount,
+        )
+    except DuplicateOrderError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except IntakeProductUnavailableError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    customer = ticket.customer
+    order = ticket.order
+    return TicketDetailResponse(
+        business_key=ticket.business_key,
+        subject=ticket.subject,
+        issue_type=ticket.issue_type,
+        description=ticket.description,
+        status=ticket.status.value,
+        demo_scenario=ticket.demo_scenario,
+        is_demo_data=ticket.is_demo_data,
+        created_at=ticket.created_at,
+        updated_at=ticket.updated_at,
+        customer=CustomerContextResponse(
+            business_key=customer.business_key,
+            name=customer.name,
+            email=customer.email,
+            phone=customer.phone,
+            is_demo_data=customer.is_demo_data,
+        ),
+        order=OrderContextResponse(
+            business_key=order.business_key,
+            product_sku=order.product_sku,
+            product_name=order.product_name,
+            purchased_at=order.purchased_at,
+            status=order.status.value,
+            amount=str(order.amount),
+            is_demo_data=order.is_demo_data,
+        ),
     )
 
 
@@ -222,7 +351,7 @@ class AgentRunRiskResponse(BaseModel):
 
 
 class AgentRunApprovalRequestResponse(BaseModel):
-    """等待人工审批时那条真实落库的审批请求（T020）。
+    """本次 Run 对应的真实落库审批请求（T020/T021）。
 
     这是"为什么停在这里"的权威来源：``risk`` 直接来自审批请求创建时保存的
     快照，因此 UI 不需要、也不应该再去重算当前政策来还原历史原因。售后政策
@@ -234,7 +363,7 @@ class AgentRunApprovalRequestResponse(BaseModel):
     status: str
     protected_action: str
     created_at: datetime
-    # pending 审批尚未有结果，因此该字段恒为 null，不用占位时间伪造审批事实
+    # pending 时为空；人工决策后返回真实 resolved_at。
     resolved_at: datetime | None
     # 风险规则触发那一刻的快照，不是此刻重算的结论
     risk: AgentRunRiskResponse
@@ -301,6 +430,14 @@ class PolicyBasisResponse(BaseModel):
     passages: list[PolicyBasisPassageResponse]
 
 
+class AgentRunRecommendationResponse(BaseModel):
+    """已验证并持久化的 AI 意图，作为面向运营人员的建议摘要。"""
+
+    action: str
+    issue_summary: str
+    confidence: float
+
+
 class AgentRunResponse(BaseModel):
     """一次 Agent Run 的真实执行结果。
 
@@ -320,6 +457,7 @@ class AgentRunResponse(BaseModel):
     steps: list[AgentStepResponse]
     replacement: AgentRunReplacementResponse | None
     ticket_result: AgentRunTicketResultResponse
+    recommendation: AgentRunRecommendationResponse | None
     risk: AgentRunRiskResponse | None
     # T020：等待人工审批时那条真实落库的审批请求。它是审批语义的权威来源；
     # 未被风险门禁拦下的 Run 没有审批请求，此处为 null。
@@ -380,12 +518,12 @@ def _risk_view(risk) -> AgentRunRiskResponse:
 def _approval_request_response(
     db: Session, agent_run: AgentRun
 ) -> AgentRunApprovalRequestResponse | None:
-    """取回该 Run 待处理的审批请求，并以其持久化快照作答。
+    """取回该 Run 的审批请求，并以其持久化快照作答。
 
     ``approval_record`` 只读取落库的快照列，不查询当前 Order / AfterSalesPolicy，
     也不调用任何风险规则求值 —— 展示的是触发时刻的历史事实。
     """
-    approval = get_pending_approval(db, agent_run)
+    approval = get_approval_request(db, agent_run)
     if approval is None:
         return None
     record = approval_record(approval)
@@ -411,13 +549,13 @@ def _risk_response(
     这种历史遗留情形下，才退回按持久化状态重新求值 —— 那时如实展示的是"此刻
     重算的结论"，而不是伪造的当时依据。
 
-    只在 Run 停在等待审批时返回：这是风险门禁真正拦下动作的场景。其余状态的
-    Run 不携带 ``risk``，避免把"没有拦下"误读成一次风险判断。
+    已存在审批请求时始终返回其触发时刻的风险快照，使已批准或已拒绝记录仍可
+    解释；没有审批历史时，仅等待审批的遗留 Run 才允许按持久化状态重算。
     """
-    if agent_run.status is not AgentRunStatus.WAITING_FOR_APPROVAL:
-        return None
     if approval is not None:
         return approval.risk
+    if agent_run.status is not AgentRunStatus.WAITING_FOR_APPROVAL:
+        return None
     risk = assess_persisted_replacement_risk(db, agent_run)
     if risk is None:
         return None
@@ -482,6 +620,15 @@ def _agent_run_response(db: Session, agent_run: AgentRun) -> AgentRunResponse:
         completed_at=agent_run.completed_at,
         error_message=agent_run.error_message,
         approval_request=approval_request,
+        recommendation=(
+            AgentRunRecommendationResponse(
+                action=agent_run.intent.requested_action,
+                issue_summary=agent_run.intent.issue_summary,
+                confidence=agent_run.intent.confidence,
+            )
+            if agent_run.intent is not None
+            else None
+        ),
         risk=_risk_response(db, agent_run, approval_request),
         policy_basis=_policy_basis_response(agent_run),
         # 关系上已按 step_order 排序，时间线顺序即真实执行顺序
@@ -573,11 +720,13 @@ async def list_approval_requests(
                 ticket=TicketDetailResponse(
                     business_key=ticket.business_key,
                     subject=ticket.subject,
+                    issue_type=ticket.issue_type,
                     description=ticket.description,
                     status=ticket.status.value,
                     demo_scenario=ticket.demo_scenario,
                     is_demo_data=ticket.is_demo_data,
                     created_at=ticket.created_at,
+                    updated_at=ticket.updated_at,
                     customer=CustomerContextResponse(
                         business_key=customer.business_key,
                         name=customer.name,

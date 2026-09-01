@@ -23,10 +23,16 @@ def test_list_tickets_returns_seeded_demo_tickets():
     business_keys = {ticket["business_key"] for ticket in tickets}
     assert {"ticket-demo-001", "ticket-demo-002", "ticket-demo-003"}.issubset(business_keys)
 
-    for ticket in tickets:
+    seeded = [
+        ticket for ticket in tickets
+        if ticket["business_key"] in {"ticket-demo-001", "ticket-demo-002", "ticket-demo-003"}
+    ]
+    assert len(seeded) == 3
+    for ticket in seeded:
         assert ticket["is_demo_data"] is True
         assert "subject" in ticket
         assert "status" in ticket
+        assert "updated_at" in ticket
 
 
 def test_list_tickets_reports_failure_when_database_is_unavailable():

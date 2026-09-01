@@ -76,6 +76,12 @@ export interface AgentRunApprovalRequest {
   risk: AgentRunRisk
 }
 
+export interface AgentRunRecommendation {
+  action: string
+  issue_summary: string
+  confidence: number
+}
+
 export interface AgentRunRecord {
   business_key: string
   ticket_key: string
@@ -87,6 +93,7 @@ export interface AgentRunRecord {
   steps: AgentRunStep[]
   replacement: AgentRunReplacement | null
   ticket_result: AgentRunTicketResult
+  recommendation: AgentRunRecommendation | null
   policy_basis: PolicyBasis | null
   risk: AgentRunRisk | null
   approval_request: AgentRunApprovalRequest | null
@@ -164,6 +171,16 @@ function isPolicyBasisPassage(value: unknown): value is PolicyBasisPassage {
   )
 }
 
+function isAgentRunRecommendation(value: unknown): value is AgentRunRecommendation {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.action === 'string' &&
+    typeof record.issue_summary === 'string' &&
+    typeof record.confidence === 'number'
+  )
+}
+
 function isPolicyBasis(value: unknown): value is PolicyBasis {
   if (typeof value !== 'object' || value === null) {
     return false
@@ -228,6 +245,7 @@ function isAgentRunRecord(value: unknown): value is AgentRunRecord {
     record.steps.every(isAgentRunStep) &&
     (record.replacement === null || isAgentRunReplacement(record.replacement)) &&
     isAgentRunTicketResult(record.ticket_result) &&
+    (record.recommendation === null || isAgentRunRecommendation(record.recommendation)) &&
     (record.policy_basis === null || isPolicyBasis(record.policy_basis)) &&
     (record.risk === null || isAgentRunRisk(record.risk)) &&
     (record.approval_request === null || isAgentRunApprovalRequest(record.approval_request))

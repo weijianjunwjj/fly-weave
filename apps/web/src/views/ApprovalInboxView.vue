@@ -51,11 +51,13 @@ const demoApproval: ApprovalInboxItem = {
   ticket: {
     business_key: 'TK-20260831-1048',
     subject: '高价值订单配送损坏换货',
+    issue_type: '商品损坏',
     description: '客户收到商品时外包装严重破损，商品无法正常使用，希望尽快安排同款换货。',
     status: 'open',
     demo_scenario: 'approval_required',
     is_demo_data: true,
     created_at: '2026-08-31T08:21:00',
+    updated_at: '2026-08-31T08:21:00',
     customer: {
       business_key: 'customer-demo-preview',
       name: '王女士',
@@ -88,6 +90,11 @@ const demoApproval: ApprovalInboxItem = {
     ],
     replacement: null,
     ticket_result: { status: 'open', resolution: null, resolution_summary: null, resolved_at: null, replacement_key: null },
+    recommendation: {
+      action: 'replacement',
+      issue_summary: '客户收到商品时外包装严重破损，商品无法正常使用，希望尽快安排同款换货。',
+      confidence: 1,
+    },
     policy_basis: {
       status: 'success',
       query_summary: '商品到货损坏且在售后时限内，符合换货条件。',

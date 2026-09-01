@@ -7,6 +7,7 @@
   ],
   "scripts": {
     "dev": "npm run dev -w @flyweave/web",
+    "test": "python -m pytest",
     "build": "npm run build -w @flyweave/web",
     "typecheck": "npm run typecheck -w @flyweave/web",
     "preview": "npm run preview -w @flyweave/web",
