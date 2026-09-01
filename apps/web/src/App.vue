@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import AgentRunDetailView from './views/AgentRunDetailView.vue'
+import AgentRunsView from './views/AgentRunsView.vue'
 import AgentRunView from './views/AgentRunView.vue'
 import ApprovalInboxView from './views/ApprovalInboxView.vue'
 import ServiceOperationsDashboard from './views/ServiceOperationsDashboard.vue'
@@ -40,13 +42,23 @@ const agentRunTicketKey = computed<string | null>(() => {
   return match ? decodeURIComponent(match[1]) : null
 })
 
+const agentRunDetailKey = computed<string | null>(() => {
+  const match = currentHash.value.match(/^#\/agent-runs\/([^/?]+)$/)
+  return match ? decodeURIComponent(match[1]) : null
+})
+
+const isAgentRuns = computed(() =>
+  currentHash.value === '#/agent-runs' ||
+  (!currentHash.value && window.location.pathname === '/agent-runs')
+)
+
 const isApprovalInbox = computed(() =>
-  currentHash.value === '#/approvals' || (!currentHash.value && window.location.pathname === '/approvals')
+  currentHash.value.startsWith('#/approvals') || (!currentHash.value && window.location.pathname === '/approvals')
 )
 
 const pageTitle = computed(() => {
   if (isApprovalInbox.value) return 'Approval Inbox'
-  if (agentRunTicketKey.value) return 'Agent Runs'
+  if (isAgentRuns.value || agentRunDetailKey.value || agentRunTicketKey.value) return 'Agent Runs'
   if (ticketDetailKey.value) return 'Service Operations'
   return 'Service Operations'
 })
@@ -68,10 +80,10 @@ onUnmounted(() => window.removeEventListener('hashchange', handleHashChange))
 
       <nav aria-label="主导航">
         <p>WORKSPACE</p>
-        <a href="#/" :class="{ active: !isApprovalInbox && !ticketDetailKey && !agentRunTicketKey }"><span>⌂</span> Overview</a>
+        <a href="#/" :class="{ active: !isApprovalInbox && !ticketDetailKey && !agentRunTicketKey && !isAgentRuns && !agentRunDetailKey }"><span>⌂</span> Overview</a>
         <a href="#/" :class="{ active: !isApprovalInbox && !!ticketDetailKey }"><span>◫</span> Service Operations</a>
         <a href="#/approvals" :class="{ active: isApprovalInbox }"><span>✓</span> Approval Inbox <b v-if="isApprovalInbox">•</b></a>
-        <a :href="ticketDetailKey ? `#/tickets/${ticketDetailKey}/agent-run` : '#/'" :class="{ active: !!agentRunTicketKey }"><span>✦</span> Agent Runs</a>
+        <a href="#/agent-runs" :class="{ active: isAgentRuns || !!agentRunDetailKey || !!agentRunTicketKey }"><span>✦</span> Agent Runs</a>
         <a href="#/approvals"><span>≡</span> Audit</a>
       </nav>
 
@@ -93,7 +105,9 @@ onUnmounted(() => window.removeEventListener('hashchange', handleHashChange))
       </header>
 
       <main>
-        <AgentRunView v-if="agentRunTicketKey" :ticket-key="agentRunTicketKey" />
+        <AgentRunDetailView v-if="agentRunDetailKey" :run-key="agentRunDetailKey" />
+        <AgentRunsView v-else-if="isAgentRuns" />
+        <AgentRunView v-else-if="agentRunTicketKey" :ticket-key="agentRunTicketKey" />
         <TicketDetailView v-else-if="ticketDetailKey" :ticket-key="ticketDetailKey" />
         <ApprovalInboxView v-else-if="isApprovalInbox" />
         <ServiceOperationsDashboard v-else />

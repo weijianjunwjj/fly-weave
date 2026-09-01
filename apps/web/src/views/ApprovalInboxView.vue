@@ -218,6 +218,12 @@ async function loadInbox(): Promise<void> {
   try {
     approvals.value = await fetchApprovalInbox()
     loadState.value = approvals.value.length ? 'ready' : 'empty'
+    const query = window.location.hash.split('?')[1] ?? ''
+    const requestedKey = new URLSearchParams(query).get('approval')
+    const requested = approvals.value.find(
+      item => item.approval.approval_key === requestedKey,
+    )
+    if (requested) await openDetail(requested)
   } catch {
     approvals.value = [demoApproval]
     loadState.value = 'demo'
@@ -399,7 +405,7 @@ onMounted(loadInbox)
     <div v-if="selected" class="drawer-layer" @click.self="selected = null">
       <aside class="detail-drawer" role="dialog" aria-modal="true" aria-labelledby="approval-detail-title">
         <header class="drawer-header">
-          <div><span class="detail-kicker">APPROVAL REVIEW</span><h2 id="approval-detail-title">{{ selected.ticket.subject }}</h2><p>{{ selected.ticket.business_key }} · {{ selected.approval.approval_key }}</p></div>
+          <div><span class="detail-kicker">APPROVAL REVIEW</span><h2 id="approval-detail-title">{{ selected.ticket.subject }}</h2><p>{{ selected.ticket.business_key }} · {{ selected.approval.approval_key }}</p><nav class="drawer-nav"><a :href="`#/tickets/${selected.ticket.business_key}`">查看工单</a><a :href="`#/agent-runs/${selected.approval.agent_run_key}`">查看 Agent Run</a></nav></div>
           <button class="close-button" type="button" aria-label="关闭详情" @click="selected = null">×</button>
         </header>
 
@@ -537,7 +543,7 @@ onMounted(loadInbox)
 .primary-button,.approve-button { border: 0; border-radius: 8px; background: #6557c8; color: #fff; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }.primary-button { padding: 10px 15px; }
 .drawer-layer { position: fixed; z-index: 50; inset: 0; display: flex; justify-content: flex-end; background: rgba(22,29,44,.32); backdrop-filter: blur(2px); }
 .detail-drawer { display: flex; width: min(720px, 92vw); height: 100vh; flex-direction: column; background: #f8f9fb; box-shadow: -18px 0 50px rgba(22,29,44,.16); }
-.drawer-header { display: flex; justify-content: space-between; padding: 25px 30px 20px; border-bottom: 1px solid #e1e5eb; background: #fff; }.drawer-header h2 { margin: 6px 0 3px; font-size: 21px; letter-spacing: -.02em; }.drawer-header p { margin: 0; color: #8a92a0; font-size: 10px; }.close-button { align-self: flex-start; width: 30px; height: 30px; border-radius: 8px; background: #f2f3f6; font-size: 20px; }
+.drawer-header { display: flex; justify-content: space-between; padding: 25px 30px 20px; border-bottom: 1px solid #e1e5eb; background: #fff; }.drawer-header h2 { margin: 6px 0 3px; font-size: 21px; letter-spacing: -.02em; }.drawer-header p { margin: 0; color: #8a92a0; font-size: 10px; }.drawer-nav { display: flex; gap: 8px; margin-top: 10px; padding: 0; }.drawer-nav a { height: auto; margin: 0; padding: 5px 8px; border: 1px solid #ddd9f3; border-radius: 6px; color: #6253b7; font-size: 8.5px; text-decoration: none; }.close-button { align-self: flex-start; width: 30px; height: 30px; border-radius: 8px; background: #f2f3f6; font-size: 20px; }
 .drawer-scroll { overflow-y: auto; flex: 1; padding: 22px 28px 40px; }.detail-section { margin-bottom: 18px; padding: 20px; border: 1px solid #e1e5eb; border-radius: 11px; background: #fff; }.section-title { display: flex; align-items: center; gap: 10px; margin-bottom: 17px; }.section-title>span:first-child { display: grid; place-items: center; width: 25px; height: 25px; border-radius: 7px; background: #f0eefb; color: #6858c2; font-size: 9px; font-weight: 800; }.section-title h3 { margin: 0; font-size: 13px; }.section-title p { margin: 2px 0 0; color: #9299a6; font-size: 9.5px; }.ticket-status,.verified { margin-left: auto; padding: 4px 7px; border-radius: 5px; background: #eef8f4; color: #17805b; font-size: 9px; font-weight: 700; text-transform: uppercase; }
 .context-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; }.context-grid>div { padding: 12px; border-radius: 8px; background: #f7f8fa; }.context-grid small,.recommendation-box small,.problem-box small { display: block; color: #949ba8; font-size: 9px; font-weight: 700; text-transform: uppercase; }.context-grid strong { display: block; overflow: hidden; margin: 5px 0 3px; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.context-grid span { display: block; overflow: hidden; color: #7f8796; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }.problem-box { margin-top: 11px; padding: 12px 14px; border-left: 3px solid #d7d1f7; background: #fafaff; }.problem-box p { margin: 6px 0 0; color: #50596a; font-size: 11px; line-height: 1.65; }
 .recommendation-box { display: flex; gap: 13px; padding: 16px; border: 1px solid #ded9f6; border-radius: 9px; background: #faf9ff; }.spark { display: grid; flex: 0 0 auto; place-items: center; width: 33px; height: 33px; border-radius: 9px; background: #6758c8; color: #fff; }.recommendation-box h4 { margin: 5px 0; font-size: 15px; }.recommendation-box p { margin: 0; color: #6f7786; font-size: 10.5px; line-height: 1.6; }

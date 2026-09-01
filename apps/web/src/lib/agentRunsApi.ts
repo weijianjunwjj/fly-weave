@@ -1,4 +1,8 @@
-import { TicketNotFoundError } from './ticketsApi'
+import {
+  isTicketDetailRecord,
+  TicketNotFoundError,
+  type TicketDetailRecord,
+} from './ticketsApi'
 
 /**
  * Agent Run 时间线上的一个真实步骤。
@@ -73,6 +77,7 @@ export interface AgentRunApprovalRequest {
   protected_action: string
   created_at: string
   resolved_at: string | null
+  decision_reason?: string | null
   risk: AgentRunRisk
 }
 
@@ -99,7 +104,13 @@ export interface AgentRunRecord {
   approval_request: AgentRunApprovalRequest | null
 }
 
-const TICKETS_ENDPOINT = 'http://localhost:8000/tickets'
+export interface AgentRunCenterItem {
+  agent_run: AgentRunRecord
+  ticket: TicketDetailRecord
+}
+
+const API_BASE = 'http://localhost:8000'
+const TICKETS_ENDPOINT = `${API_BASE}/tickets`
 
 /** 工单存在但从未执行过 Agent Run 时抛出，用于与网络 / 服务故障区分 */
 export class AgentRunNotFoundError extends Error {
@@ -224,6 +235,7 @@ function isAgentRunApprovalRequest(value: unknown): value is AgentRunApprovalReq
     typeof record.protected_action === 'string' &&
     typeof record.created_at === 'string' &&
     isNullableString(record.resolved_at) &&
+    (record.decision_reason === undefined || isNullableString(record.decision_reason)) &&
     isAgentRunRisk(record.risk)
   )
 }
@@ -291,4 +303,44 @@ export async function fetchLatestAgentRun(ticketKey: string): Promise<AgentRunRe
     throw new Error(`Agent Run 接口返回异常状态: ${response.status}`)
   }
   return parseAgentRun(await response.json())
+}
+
+
+function parseAgentRunCenterItem(value: unknown): AgentRunCenterItem {
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('Agent Runs 接口返回了非预期的数据结构')
+  }
+  const record = value as Record<string, unknown>
+  if (!isTicketDetailRecord(record.ticket)) {
+    throw new Error('Agent Runs 接口缺少真实工单上下文')
+  }
+  return {
+    agent_run: parseAgentRun(record.agent_run),
+    ticket: record.ticket,
+  }
+}
+
+export async function fetchAgentRuns(): Promise<AgentRunCenterItem[]> {
+  const response = await fetch(`${API_BASE}/agent-runs`)
+  if (!response.ok) {
+    throw new Error(`Agent Runs 接口返回异常状态: ${response.status}`)
+  }
+  const data = await response.json()
+  if (!Array.isArray(data)) {
+    throw new Error('Agent Runs 接口返回了非预期的数据结构')
+  }
+  return data.map(parseAgentRunCenterItem)
+}
+
+export async function fetchAgentRun(agentRunKey: string): Promise<AgentRunCenterItem> {
+  const response = await fetch(
+    `${API_BASE}/agent-runs/${encodeURIComponent(agentRunKey)}`,
+  )
+  if (response.status === 404) {
+    throw new AgentRunNotFoundError(agentRunKey)
+  }
+  if (!response.ok) {
+    throw new Error(`Agent Run 详情接口返回异常状态: ${response.status}`)
+  }
+  return parseAgentRunCenterItem(await response.json())
 }

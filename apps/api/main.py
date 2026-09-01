@@ -369,6 +369,16 @@ class AgentRunApprovalRequestResponse(BaseModel):
     risk: AgentRunRiskResponse
 
 
+class AgentRunCenterApprovalRequestResponse(AgentRunApprovalRequestResponse):
+    """Execution Center 专用审批视图，扩展人工决策理由。
+
+    旧 AgentRun API 继续使用 AgentRunApprovalRequestResponse，避免改变既有
+    start/latest payload；只有新的聚合读取接口暴露该字段。
+    """
+
+    decision_reason: str | None
+
+
 class ApprovalDecisionRequest(BaseModel):
     """人工审批决策的可选请求体（T021）。
 
@@ -467,6 +477,12 @@ class AgentRunResponse(BaseModel):
     policy_basis: PolicyBasisResponse | None = None
 
 
+class AgentRunCenterRunResponse(AgentRunResponse):
+    """Execution Center 专用 Run DTO，审批快照包含真实人工决策理由。"""
+
+    approval_request: AgentRunCenterApprovalRequestResponse | None
+
+
 class ApprovalInboxItemResponse(BaseModel):
     """审批工作台的一条真实聚合视图。
 
@@ -478,6 +494,17 @@ class ApprovalInboxItemResponse(BaseModel):
     created_at: datetime
     ticket: TicketDetailResponse
     agent_run: AgentRunResponse
+
+
+class AgentRunCenterItemResponse(BaseModel):
+    """AI Execution Center 的真实聚合读取视图。
+
+    Run、Ticket 与 Approval 都直接映射已有持久化实体；该模型只减少前端
+    N+1 请求，不创建新的执行状态、步骤或业务结论。
+    """
+
+    agent_run: AgentRunCenterRunResponse
+    ticket: TicketDetailResponse
 
 
 class ResumeAgentRunResponse(BaseModel):
@@ -516,8 +543,11 @@ def _risk_view(risk) -> AgentRunRiskResponse:
 
 
 def _approval_request_response(
-    db: Session, agent_run: AgentRun
-) -> AgentRunApprovalRequestResponse | None:
+    db: Session,
+    agent_run: AgentRun,
+    *,
+    include_decision_reason: bool = False,
+) -> AgentRunApprovalRequestResponse | AgentRunCenterApprovalRequestResponse | None:
     """取回该 Run 的审批请求，并以其持久化快照作答。
 
     ``approval_record`` 只读取落库的快照列，不查询当前 Order / AfterSalesPolicy，
@@ -527,7 +557,7 @@ def _approval_request_response(
     if approval is None:
         return None
     record = approval_record(approval)
-    return AgentRunApprovalRequestResponse(
+    common = dict(
         approval_key=record.approval_key,
         status=record.status.value,
         protected_action=record.protected_action.value,
@@ -535,6 +565,12 @@ def _approval_request_response(
         resolved_at=record.resolved_at,
         risk=_risk_view(record.risk),
     )
+    if include_decision_reason:
+        return AgentRunCenterApprovalRequestResponse(
+            **common,
+            decision_reason=record.decision_reason,
+        )
+    return AgentRunApprovalRequestResponse(**common)
 
 
 def _risk_response(
@@ -604,14 +640,26 @@ def _policy_basis_response(agent_run: AgentRun) -> PolicyBasisResponse | None:
     )
 
 
-def _agent_run_response(db: Session, agent_run: AgentRun) -> AgentRunResponse:
-    """把已持久化的 Run 映射为响应模型，不做任何状态推断或补齐"""
+def _agent_run_response(
+    db: Session,
+    agent_run: AgentRun,
+    *,
+    include_decision_reason: bool = False,
+) -> AgentRunResponse | AgentRunCenterRunResponse:
+    """映射持久化 Run；仅 Execution Center 扩展人工决策理由。"""
     ticket = agent_run.ticket
     replacement = agent_run.replacement
     resolution_replacement = ticket.resolution_replacement
-    approval_request = _approval_request_response(db, agent_run)
+    approval_request = _approval_request_response(
+        db,
+        agent_run,
+        include_decision_reason=include_decision_reason,
+    )
+    response_type = (
+        AgentRunCenterRunResponse if include_decision_reason else AgentRunResponse
+    )
 
-    return AgentRunResponse(
+    return response_type(
         business_key=agent_run.business_key,
         ticket_key=ticket.business_key,
         status=agent_run.status.value,
@@ -752,6 +800,95 @@ async def list_approval_requests(
             )
         )
     return items
+
+
+def _ticket_detail_view(ticket: Ticket) -> TicketDetailResponse:
+    """把已加载的 Ticket 关系映射为产品上下文，不补造缺失关联。"""
+    customer = ticket.customer
+    order = ticket.order
+    return TicketDetailResponse(
+        business_key=ticket.business_key,
+        subject=ticket.subject,
+        issue_type=ticket.issue_type,
+        description=ticket.description,
+        status=ticket.status.value,
+        demo_scenario=ticket.demo_scenario,
+        is_demo_data=ticket.is_demo_data,
+        created_at=ticket.created_at,
+        updated_at=ticket.updated_at,
+        customer=CustomerContextResponse(
+            business_key=customer.business_key,
+            name=customer.name,
+            email=customer.email,
+            phone=customer.phone,
+            is_demo_data=customer.is_demo_data,
+        )
+        if customer is not None
+        else None,
+        order=OrderContextResponse(
+            business_key=order.business_key,
+            product_sku=order.product_sku,
+            product_name=order.product_name,
+            purchased_at=order.purchased_at,
+            status=order.status.value,
+            amount=str(order.amount),
+            is_demo_data=order.is_demo_data,
+        )
+        if order is not None
+        else None,
+    )
+
+
+def _agent_run_center_item(
+    db: Session, agent_run: AgentRun
+) -> AgentRunCenterItemResponse:
+    return AgentRunCenterItemResponse(
+        agent_run=_agent_run_response(
+            db,
+            agent_run,
+            include_decision_reason=True,
+        ),
+        ticket=_ticket_detail_view(agent_run.ticket),
+    )
+
+
+@app.get("/agent-runs", response_model=list[AgentRunCenterItemResponse])
+async def list_agent_runs(
+    db: Session = Depends(get_db),
+) -> list[AgentRunCenterItemResponse]:
+    """返回全部真实 AgentRun，供 AI Execution Center 使用。"""
+    runs = (
+        db.query(AgentRun)
+        .options(
+            joinedload(AgentRun.ticket).joinedload(Ticket.customer),
+            joinedload(AgentRun.ticket).joinedload(Ticket.order),
+        )
+        .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+        .all()
+    )
+    return [_agent_run_center_item(db, run) for run in runs]
+
+
+@app.get(
+    "/agent-runs/{agent_run_key}",
+    response_model=AgentRunCenterItemResponse,
+)
+async def get_agent_run(
+    agent_run_key: str, db: Session = Depends(get_db)
+) -> AgentRunCenterItemResponse:
+    """按稳定业务标识返回一条真实 Run 及其 Ticket 上下文。"""
+    run = (
+        db.query(AgentRun)
+        .options(
+            joinedload(AgentRun.ticket).joinedload(Ticket.customer),
+            joinedload(AgentRun.ticket).joinedload(Ticket.order),
+        )
+        .filter(AgentRun.business_key == agent_run_key)
+        .one_or_none()
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"未找到 AgentRun: {agent_run_key}")
+    return _agent_run_center_item(db, run)
 
 
 @app.post(
