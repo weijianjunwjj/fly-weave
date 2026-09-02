@@ -25,6 +25,7 @@ from approval_service import approval_record, get_approval_request
 from approvals import ApprovalRequestStatus
 from config import settings
 from database import get_db
+from demo_scenario_service import create_high_risk_replacement_demo
 from models import AgentRun, AgentRunStatus, ApprovalRequest, AuditEvent, Ticket
 from risk_service import assess_persisted_replacement_risk
 from ticket_intake_service import (
@@ -295,6 +296,34 @@ async def create_ticket_endpoint(
             is_demo_data=order.is_demo_data,
         ),
     )
+
+
+_DEMO_ENVIRONMENTS = {"development", "demo", "local", "test"}
+
+
+@app.post(
+    "/demo/scenarios/high-risk-replacement",
+    response_model=TicketDetailResponse,
+    status_code=201,
+)
+async def bootstrap_high_risk_replacement_demo(
+    db: Session = Depends(get_db),
+) -> TicketDetailResponse:
+    """Create only real demo inputs; execution continues through normal APIs."""
+
+    if settings.app_env.strip().lower() not in _DEMO_ENVIRONMENTS:
+        # The route remains clearly outside the customer-service API surface and
+        # is unavailable in production-like environments.
+        raise HTTPException(status_code=404, detail="Demo scenarios are unavailable")
+
+    try:
+        ticket = create_high_risk_replacement_demo(db)
+    except DuplicateOrderError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except IntakeProductUnavailableError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    return _ticket_detail_view(ticket)
 
 
 class AgentStepResponse(BaseModel):

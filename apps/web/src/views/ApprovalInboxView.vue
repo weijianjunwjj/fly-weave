@@ -9,10 +9,7 @@ import {
   type ApprovalInboxItem,
   type AuditEvent,
 } from '../lib/approvalsApi'
-import { startAgentRun } from '../lib/agentRunsApi'
-import { fetchTickets } from '../lib/ticketsApi'
-
-type LoadState = 'loading' | 'ready' | 'empty' | 'demo'
+type LoadState = 'loading' | 'ready' | 'empty' | 'failed'
 type ActionPhase = 'idle' | 'approving' | 'executing' | 'rejecting'
 
 const loadState = ref<LoadState>('loading')
@@ -24,116 +21,6 @@ const actionPhase = ref<ActionPhase>('idle')
 const notice = ref<string | null>(null)
 const rejectOpen = ref(false)
 const rejectionNote = ref('')
-const isCreatingScenario = ref(false)
-
-const demoApproval: ApprovalInboxItem = {
-  created_at: '2026-08-31T08:24:00',
-  approval: {
-    approval_key: 'demo-approval-preview',
-    status: 'pending',
-    protected_action: 'create_replacement',
-    agent_run_key: 'demo-run-preview',
-    agent_run_status: 'waiting_for_approval',
-    resolved_at: null,
-    decision_reason: null,
-    risk: {
-      action: 'create_replacement',
-      level: 'high',
-      rule_code: 'order_amount_above_approval_threshold',
-      requires_approval: true,
-      reason: '订单金额 ¥1,299 超过 AI 自动授权上限 ¥500，需要人工确认。',
-      order_key: 'ORD-20260831-0824',
-      order_amount: '1299.00',
-      approval_threshold_amount: '500.00',
-      policy_key: 'after-sales-policy-cn',
-    },
-  },
-  ticket: {
-    business_key: 'TK-20260831-1048',
-    subject: '高价值订单配送损坏换货',
-    issue_type: '商品损坏',
-    description: '客户收到商品时外包装严重破损，商品无法正常使用，希望尽快安排同款换货。',
-    status: 'open',
-    demo_scenario: 'approval_required',
-    is_demo_data: true,
-    created_at: '2026-08-31T08:21:00',
-    updated_at: '2026-08-31T08:21:00',
-    customer: {
-      business_key: 'customer-demo-preview',
-      name: '王女士',
-      email: 'wang@example.com',
-      phone: null,
-      is_demo_data: true,
-    },
-    order: {
-      business_key: 'ORD-20260831-0824',
-      product_sku: 'FW-AIR-07',
-      product_name: 'FlyAir 智能净化器',
-      purchased_at: '2026-08-23T10:30:00',
-      status: 'delivered',
-      amount: '1299.00',
-      is_demo_data: true,
-    },
-  },
-  agent_run: {
-    business_key: 'demo-run-preview',
-    ticket_key: 'TK-20260831-1048',
-    status: 'waiting_for_approval',
-    created_at: '2026-08-31T08:23:00',
-    started_at: '2026-08-31T08:23:00',
-    completed_at: null,
-    error_message: null,
-    steps: [
-      { step_order: 1, name: 'intent_extraction', status: 'completed', started_at: '2026-08-31T08:23:00', completed_at: '2026-08-31T08:23:06', error_message: null },
-      { step_order: 2, name: 'policy_retrieval', status: 'completed', started_at: '2026-08-31T08:23:06', completed_at: '2026-08-31T08:23:12', error_message: null },
-      { step_order: 3, name: 'risk_evaluation', status: 'completed', started_at: '2026-08-31T08:23:12', completed_at: '2026-08-31T08:23:16', error_message: null },
-    ],
-    replacement: null,
-    ticket_result: { status: 'open', resolution: null, resolution_summary: null, resolved_at: null, replacement_key: null },
-    recommendation: {
-      action: 'replacement',
-      issue_summary: '客户收到商品时外包装严重破损，商品无法正常使用，希望尽快安排同款换货。',
-      confidence: 1,
-    },
-    policy_basis: {
-      status: 'success',
-      query_summary: '商品到货损坏且在售后时限内，符合换货条件。',
-      document_key: 'policy-after-sales-cn',
-      document_title: '售后服务政策',
-      source_reference: '§ 4.2 到货损坏处理',
-      is_demo_data: true,
-      failure_reason: null,
-      passages: [{
-        rank: 1,
-        score: 0.94,
-        chunk_key: 'policy-preview-4-2',
-        chunk_order: 4,
-        passage: '商品签收后 7 日内发现运输损坏，可免费安排同款换货；高价值订单需经人工授权。',
-      }],
-    },
-    risk: {
-      action: 'create_replacement',
-      level: 'high',
-      rule_code: 'order_amount_above_approval_threshold',
-      requires_approval: true,
-      reason: '订单金额 ¥1,299 超过 AI 自动授权上限 ¥500，需要人工确认。',
-      order_key: 'ORD-20260831-0824',
-      order_amount: '1299.00',
-      approval_threshold_amount: '500.00',
-      policy_key: 'after-sales-policy-cn',
-    },
-    approval_request: null,
-  },
-}
-
-const demoAudit: AuditEvent[] = [
-  { event_key: 'demo-1', event_type: 'ticket_received', actor_type: 'system', occurred_at: '2026-08-31T08:21:00', outcome: 'created', success: true, action: '接收客服工单', summary: '工单已进入 AI 服务工作流', affected_object_type: 'ticket', affected_object_key: 'TK-20260831-1048', reference_type: null, reference_key: null },
-  { event_key: 'demo-2', event_type: 'policy_retrieved', actor_type: 'agent', occurred_at: '2026-08-31T08:23:12', outcome: 'success', success: true, action: '检索企业政策', summary: '已匹配售后服务政策 § 4.2', affected_object_type: 'agent_run', affected_object_key: 'demo-run-preview', reference_type: null, reference_key: null },
-  { event_key: 'demo-3', event_type: 'risk_gate', actor_type: 'system', occurred_at: '2026-08-31T08:23:16', outcome: 'approval_required', success: false, action: '执行风险评估', summary: '金额超过自动授权上限，已阻止业务动作', affected_object_type: 'agent_run', affected_object_key: 'demo-run-preview', reference_type: null, reference_key: null },
-  { event_key: 'demo-4', event_type: 'approval_request_created', actor_type: 'system', occurred_at: '2026-08-31T08:24:00', outcome: 'created', success: true, action: '创建人工审批', summary: '审批请求已进入 Approval Inbox', affected_object_type: 'approval_request', affected_object_key: 'demo-approval-preview', reference_type: null, reference_key: null },
-]
-
-const isDemoMode = computed(() => loadState.value === 'demo')
 const pendingCount = computed(() => approvals.value.filter(item => item.approval.status === 'pending').length)
 const highRiskCount = computed(() => approvals.value.filter(item => item.approval.risk.level.toLowerCase() === 'high').length)
 const approvedToday = computed(() => approvals.value.filter(item => item.approval.status === 'approved' && isToday(item.approval.resolved_at)).length)
@@ -225,9 +112,9 @@ async function loadInbox(): Promise<void> {
     )
     if (requested) await openDetail(requested)
   } catch {
-    approvals.value = [demoApproval]
-    loadState.value = 'demo'
-    notice.value = '审批服务暂时不可用，当前展示示例服务场景。连接恢复后可执行真实审批。'
+    approvals.value = []
+    loadState.value = 'failed'
+    notice.value = '审批服务暂时不可用。未展示任何伪造审批，请恢复服务后重试。'
   }
 }
 
@@ -237,11 +124,6 @@ async function openDetail(item: ApprovalInboxItem): Promise<void> {
   rejectionNote.value = ''
   notice.value = null
   auditLoading.value = true
-  if (isDemoMode.value) {
-    auditEvents.value = demoAudit
-    auditLoading.value = false
-    return
-  }
   try {
     auditEvents.value = await fetchAuditEvents(item.approval.agent_run_key)
   } catch {
@@ -260,7 +142,7 @@ function replaceSelected(item: ApprovalInboxItem): void {
 }
 
 async function handleApprove(): Promise<void> {
-  if (!selected.value || isDemoMode.value || actionPhase.value !== 'idle') return
+  if (!selected.value || actionPhase.value !== 'idle') return
   actionPhase.value = 'approving'
   notice.value = null
   const current = selected.value
@@ -286,7 +168,7 @@ async function handleApprove(): Promise<void> {
 }
 
 async function retryResume(): Promise<void> {
-  if (!selected.value || isDemoMode.value || actionPhase.value !== 'idle') return
+  if (!selected.value || actionPhase.value !== 'idle') return
   actionPhase.value = 'executing'
   notice.value = null
   try {
@@ -302,7 +184,7 @@ async function retryResume(): Promise<void> {
 }
 
 async function handleReject(): Promise<void> {
-  if (!selected.value || isDemoMode.value || actionPhase.value !== 'idle') return
+  if (!selected.value || actionPhase.value !== 'idle') return
   actionPhase.value = 'rejecting'
   notice.value = null
   try {
@@ -318,26 +200,6 @@ async function handleReject(): Promise<void> {
   }
 }
 
-async function createDemoScenario(): Promise<void> {
-  if (isCreatingScenario.value) return
-  isCreatingScenario.value = true
-  notice.value = null
-  try {
-    const tickets = await fetchTickets()
-    const ticket = tickets.find(item => item.demo_scenario === 'approval_required')
-    if (!ticket) {
-      notice.value = '当前没有可启动的示例高风险工单。'
-      return
-    }
-    await startAgentRun(ticket.business_key)
-    await loadInbox()
-  } catch {
-    notice.value = '示例场景启动失败，请确认后端服务可用后重试。'
-  } finally {
-    isCreatingScenario.value = false
-  }
-}
-
 onMounted(loadInbox)
 </script>
 
@@ -350,14 +212,14 @@ onMounted(loadInbox)
         <p>查看并处理需要人工确认的 AI 操作，在执行高风险业务动作前保留最终控制权。</p>
       </div>
       <div class="heading-actions">
-        <span v-if="isDemoMode" class="demo-badge"><i></i> Demo Mode · Sample scenarios</span>
+        <a class="run-demo-link" href="#/?demo=open">运行真实演示</a>
         <button class="refresh-button" type="button" :disabled="loadState === 'loading'" @click="loadInbox">↻ 刷新</button>
       </div>
     </section>
 
-    <div v-if="notice" class="notice" :class="{ demo: isDemoMode }" role="status">
+    <div v-if="notice" class="notice" role="status">
       <span>{{ notice }}</span>
-      <button v-if="isDemoMode" type="button" @click="loadInbox">重新连接</button>
+      <button v-if="loadState === 'failed'" type="button" @click="loadInbox">重试</button>
     </div>
 
     <section class="metrics" aria-label="审批统计">
@@ -377,11 +239,14 @@ onMounted(loadInbox)
         <span class="spinner"></span><h3>正在加载审批工作台</h3><p>正在同步 ApprovalRequest 与执行上下文…</p>
       </div>
 
+      <div v-else-if="loadState === 'failed'" class="state-view" data-testid="approval-inbox-state" data-state="failed">
+        <span class="empty-icon error">!</span><h3>审批数据暂时不可用</h3><p>页面不会用示例记录替代真实 ApprovalRequest。</p>
+        <button class="primary-button" type="button" @click="loadInbox">重试连接</button>
+      </div>
+
       <div v-else-if="loadState === 'empty'" class="state-view" data-testid="approval-inbox-state" data-state="empty">
-        <span class="empty-icon">✓</span><h3>当前没有待审批操作</h3><p>所有高风险 AI 操作都已处理，新的请求会自动出现在这里。</p>
-        <button class="primary-button" type="button" :disabled="isCreatingScenario" @click="createDemoScenario">
-          {{ isCreatingScenario ? '正在运行真实场景…' : '运行示例高风险工单' }}
-        </button>
+        <span class="empty-icon">✓</span><h3>当前没有待审批操作</h3><p>所有高风险 AI 操作都已处理，新的真实请求会自动出现在这里。</p>
+        <a class="primary-button link-button" href="#/?demo=open">运行高风险演示</a>
       </div>
 
       <div v-else class="approval-table" data-testid="approval-inbox-state" :data-state="loadState">
@@ -411,7 +276,7 @@ onMounted(loadInbox)
 
         <div class="drawer-scroll">
           <section class="detail-section ticket-context">
-            <div class="section-title"><span>01</span><div><h3>Ticket Context</h3><p>客户与业务对象</p></div><span class="ticket-status">{{ selected.ticket.status }}</span></div>
+            <div class="section-title"><span>01</span><div><h3>Ticket Context</h3><p>客户与业务对象</p></div><span class="ticket-status">{{ statusLabel(selected) }}</span></div>
             <div class="context-grid">
               <div><small>客户</small><strong>{{ selected.ticket.customer?.name ?? '未提供' }}</strong><span>{{ selected.ticket.customer?.email ?? '—' }}</span></div>
               <div><small>关联订单</small><strong>{{ selected.ticket.order?.business_key ?? '未关联' }}</strong><span>{{ selected.ticket.order?.product_name ?? '—' }}</span></div>
@@ -444,8 +309,8 @@ onMounted(loadInbox)
             <div class="risk-evaluation">
               <div class="risk-level-block"><small>RISK</small><strong :data-level="selected.approval.risk.level">{{ selected.approval.risk.level.toUpperCase() }}</strong></div>
               <dl>
-                <div><dt>Trigger</dt><dd><code>{{ selected.approval.risk.rule_code }}</code></dd></div>
-                <div><dt>Protected action</dt><dd>{{ selected.approval.protected_action }}</dd></div>
+                <div><dt>触发条件</dt><dd>订单金额超过 AI 自动授权上限</dd></div>
+                <div><dt>受保护操作</dt><dd>{{ actionLabel(selected).split(' · ')[0] }}</dd></div>
                 <div><dt>Explanation</dt><dd>{{ selected.approval.risk.reason }}</dd></div>
               </dl>
               <div class="threshold-visual">
@@ -457,7 +322,7 @@ onMounted(loadInbox)
           </section>
 
           <section class="detail-section audit-section">
-            <div class="section-title"><span>05</span><div><h3>Audit Timeline</h3><p>{{ isDemoMode ? '示例场景事件' : '来自持久化 AuditEvent' }}</p></div></div>
+            <div class="section-title"><span>05</span><div><h3>Audit Timeline</h3><p>来自持久化 AuditEvent</p></div></div>
             <div v-if="auditLoading" class="audit-loading"><span class="spinner"></span>同步审计事件…</div>
             <ol v-else-if="auditEvents.length" class="audit-timeline">
               <li v-for="event in auditEvents" :key="event.event_key" :data-success="event.success">
@@ -470,11 +335,7 @@ onMounted(loadInbox)
         </div>
 
         <footer class="decision-panel">
-          <template v-if="isDemoMode">
-            <div><strong>Demo Mode</strong><p>当前为示例上下文。连接审批服务后可执行真实决策。</p></div>
-            <button class="secondary-button" type="button" @click="loadInbox">重新连接服务</button>
-          </template>
-          <template v-else-if="selected.agent_run.status === 'completed'">
+          <template v-if="selected.agent_run.status === 'completed'">
             <div class="outcome-icon completed">✓</div><div><strong>Action executed · Ticket resolved</strong><p>{{ selected.agent_run.ticket_result.resolution_summary ?? 'Agent 已恢复并完成业务动作。' }}</p></div>
           </template>
           <template v-else-if="selected.approval.status === 'rejected'">
@@ -511,12 +372,10 @@ onMounted(loadInbox)
 .page-heading h1 span { margin-left: 10px; color: #737b8c; font-size: .5em; font-weight: 500; letter-spacing: 0; }
 .page-heading p { margin: 0; color: #687184; font-size: 14px; }
 .heading-actions { display: flex; align-items: center; gap: 12px; }
-.demo-badge { display: flex; align-items: center; gap: 8px; padding: 8px 11px; border: 1px solid #dacb91; border-radius: 8px; background: #fffaf0; color: #755e16; font-size: 11px; font-weight: 700; }
-.demo-badge i { width: 7px; height: 7px; border-radius: 50%; background: #d59b21; }
+.run-demo-link { padding: 9px 12px; border-radius: 8px; background: #6557c8; color: #fff; font-size: 11px; font-weight: 700; text-decoration: none; }
 .refresh-button,.detail-button,.close-button,.secondary-button { border: 0; background: transparent; color: #556074; font: inherit; cursor: pointer; }
 .refresh-button { padding: 9px 12px; border: 1px solid #dce1e9; border-radius: 8px; background: #fff; font-size: 12px; }
 .notice { display: flex; justify-content: space-between; align-items: center; margin: -8px 0 18px; padding: 11px 14px; border: 1px solid #cbdcf4; border-radius: 9px; background: #f5f9ff; color: #31567f; font-size: 12px; }
-.notice.demo { border-color: #e6d8a6; background: #fffcf4; color: #705c20; }
 .notice button { border: 0; background: transparent; color: inherit; font-weight: 700; cursor: pointer; }
 .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid #e1e5ec; border-radius: 12px; background: #fff; box-shadow: 0 2px 6px rgba(31,42,68,.03); }
 .metrics article { display: flex; align-items: center; gap: 13px; min-height: 88px; padding: 18px 22px; border-right: 1px solid #e7eaf0; }
@@ -541,6 +400,8 @@ onMounted(loadInbox)
 .state-view { display: grid; min-height: 300px; place-items: center; align-content: center; padding: 50px; text-align: center; }.state-view h3 { margin: 14px 0 5px; font-size: 16px; }.state-view p { margin: 0 0 18px; color: #858d9c; font-size: 12px; }.empty-icon { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 50%; background: #edf9f4; color: #13835e; font-size: 20px; }
 .spinner { display: inline-block; width: 20px; height: 20px; border: 2px solid #dedbea; border-top-color: #6758c5; border-radius: 50%; animation: spin .8s linear infinite; }@keyframes spin { to { transform: rotate(360deg); } }
 .primary-button,.approve-button { border: 0; border-radius: 8px; background: #6557c8; color: #fff; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }.primary-button { padding: 10px 15px; }
+.link-button { display: inline-block; color: #fff; text-decoration: none; }
+.empty-icon.error { background: #fff0f0; color: #b43d3d; }
 .drawer-layer { position: fixed; z-index: 50; inset: 0; display: flex; justify-content: flex-end; background: rgba(22,29,44,.32); backdrop-filter: blur(2px); }
 .detail-drawer { display: flex; width: min(720px, 92vw); height: 100vh; flex-direction: column; background: #f8f9fb; box-shadow: -18px 0 50px rgba(22,29,44,.16); }
 .drawer-header { display: flex; justify-content: space-between; padding: 25px 30px 20px; border-bottom: 1px solid #e1e5eb; background: #fff; }.drawer-header h2 { margin: 6px 0 3px; font-size: 21px; letter-spacing: -.02em; }.drawer-header p { margin: 0; color: #8a92a0; font-size: 10px; }.drawer-nav { display: flex; gap: 8px; margin-top: 10px; padding: 0; }.drawer-nav a { height: auto; margin: 0; padding: 5px 8px; border: 1px solid #ddd9f3; border-radius: 6px; color: #6253b7; font-size: 8.5px; text-decoration: none; }.close-button { align-self: flex-start; width: 30px; height: 30px; border-radius: 8px; background: #f2f3f6; font-size: 20px; }

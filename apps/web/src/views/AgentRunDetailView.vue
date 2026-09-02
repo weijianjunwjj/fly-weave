@@ -80,7 +80,11 @@ const progressItems = computed<ProgressItem[]>(() => {
       failed: policyBlocked.value ? '政策阻止' : '失败',
       skipped: '已跳过',
     } as Record<string, string>)[step.status] ?? step.status,
-    detail: step.error_message ? conciseReason(step.error_message) : null,
+    detail: step.error_message
+      ? (step.status === 'failed' && policyBlocked.value
+        ? '业务政策阻止了本次操作'
+        : conciseReason(step.error_message))
+      : null,
     occurredAt: step.started_at ?? step.completed_at ?? run.value!.created_at,
     sequence: index,
   }))
@@ -185,7 +189,7 @@ const finalDescription = computed(() => {
       `已创建换货单 ${run.value.replacement.business_key} 并回写工单。`
   }
   if (rejected.value) return '受保护操作未执行；执行已按人工决定停止。'
-  if (policyBlocked.value) return conciseReason(run.value.error_message) || '当前业务条件不符合政策要求。'
+  if (policyBlocked.value) return '当前业务条件不符合企业政策要求；AI 未绕过规则，这不是系统故障。'
   if (run.value.status === 'failed') return conciseReason(run.value.error_message) || '执行失败，未产生可确认的最终业务结果。'
   if (waiting.value) return '受保护操作尚未执行，等待人工审批。'
   return run.value.ticket_result.resolution_summary || '暂无最终业务结果。'
@@ -193,6 +197,15 @@ const finalDescription = computed(() => {
 
 function conciseReason(value: string | null): string {
   return value?.split(/\r?\n/, 1)[0] ?? ''
+}
+
+const RULE_CODE_LABELS: Record<string, string> = {
+  order_amount_above_approval_threshold: '订单金额超过人工审批阈值',
+  no_rule_triggered: '未命中风险规则',
+}
+
+function ruleCodeLabel(code: string): string {
+  return RULE_CODE_LABELS[code] ?? code
 }
 
 function duration(value: AgentRunRecord): string {
@@ -351,7 +364,7 @@ watch(() => props.runKey, loadDetail)
             <template v-if="run.risk">
               <div class="risk-level" :data-level="run.risk.level"><small>Risk Level</small><strong>{{ run.risk.level.toUpperCase() }}</strong></div>
               <dl class="risk-facts">
-                <div><dt>Trigger</dt><dd>{{ run.risk.rule_code }}</dd></div>
+                <div><dt>Trigger</dt><dd>{{ ruleCodeLabel(run.risk.rule_code) }}</dd></div>
                 <div><dt>Explanation</dt><dd>{{ run.risk.reason }}</dd></div>
                 <div v-if="run.risk.approval_threshold_amount"><dt>Threshold</dt><dd>{{ formatAmount(run.risk.approval_threshold_amount) }}</dd></div>
                 <div v-if="run.risk.order_amount"><dt>Actual Value</dt><dd>{{ formatAmount(run.risk.order_amount) }}</dd></div>
@@ -403,7 +416,7 @@ watch(() => props.runKey, loadDetail)
 .attention-banner { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-top: 20px; padding: 14px 17px; border: 1px solid #ead5aa; border-radius: 9px; background: #fff8e9; }.attention-banner strong { font-size: 12px; }.attention-banner p { margin: 4px 0 0; color: #796b55; font-size: 9.5px; }.attention-banner a { padding: 8px 11px; border-radius: 7px; background: #6758c5; color: #fff; font-size: 9.5px; font-weight: 750; text-decoration: none; }.attention-banner.rejected { border-color: #ead2d2; background: #fff6f6; }
 .summary-strip { display: grid; grid-template-columns: repeat(6,1fr); margin: 20px 0; border: 1px solid #e0e3e8; border-radius: 10px; background: #fff; }.summary-strip div { min-width: 0; padding: 14px 15px; border-right: 1px solid #e8eaee; }.summary-strip div:last-child { border: 0; }.summary-strip small,.summary-strip strong { display: block; }.summary-strip small { color: #9299a6; font-size: 8px; font-weight: 700; text-transform: uppercase; }.summary-strip strong { overflow: hidden; margin-top: 5px; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
 .content-grid { display: grid; grid-template-columns: minmax(0,1.55fr) minmax(330px,.78fr); gap: 18px; align-items: start; }.panel { margin-bottom: 18px; padding: 20px; border: 1px solid #e0e3e8; border-radius: 11px; background: #fff; }.panel>header { display: flex; align-items: center; gap: 10px; margin-bottom: 17px; }.panel>header>span { display: grid; width: 27px; height: 27px; place-items: center; border-radius: 7px; background: #f0eefb; color: #6657c2; font-size: 9px; font-weight: 800; }.panel h2 { margin: 0; font-size: 13px; }.panel header p { margin: 2px 0 0; color: #9299a6; font-size: 8.5px; }.panel header a { margin-left: auto; color: #6253b7; font-size: 9.5px; font-weight: 750; text-decoration: none; }
-.facts-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 9px; }.facts-grid div,.policy-heading div { min-width: 0; padding: 11px; border-radius: 8px; background: #f7f8fa; }.facts-grid small,.facts-grid strong,.policy-heading small,.policy-heading strong { display: block; }.facts-grid small,.policy-heading small { color: #949ba8; font-size: 8px; font-weight: 700; text-transform: uppercase; }.facts-grid strong,.policy-heading strong { overflow: hidden; margin-top: 5px; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }.issue-description { margin: 11px 0 0; padding: 12px; border-left: 3px solid #d9d3f6; background: #fafaff; color: #596273; font-size: 10px; line-height: 1.65; }
+.facts-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 9px; }.facts-grid div,.policy-heading div { min-width: 0; padding: 11px; border-radius: 8px; background: #f7f8fa; }.facts-grid small,.facts-grid strong,.policy-heading small,.policy-heading strong { display: block; }.facts-grid small,.policy-heading small { color: #949ba8; font-size: 8px; font-weight: 700; text-transform: uppercase; }.facts-grid strong,.policy-heading strong { overflow: hidden; margin-top: 5px; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }.issue-description { margin: 11px 0 0; padding: 12px; border: 1px solid #e9e6f6; background: #fafaff; color: #596273; font-size: 10px; line-height: 1.65; }
 .stepper,.audit-list { margin: 0; padding: 0; list-style: none; }.stepper li { display: grid; grid-template-columns: 13px 1fr auto; gap: 10px; min-height: 48px; }.stepper i,.audit-list i { position: relative; width: 8px; height: 8px; margin-top: 3px; border-radius: 50%; background: #6a5bc5; }.stepper i:after,.audit-list i:after { position: absolute; top: 10px; left: 3px; width: 1px; height: 34px; background: #dfe2e8; content: ''; }.stepper li:last-child i:after,.audit-list li:last-child i:after { display: none; }.stepper li[data-state="failed"] i { background: #c43f3f; }.stepper li[data-state="blocked"] i { background: #d48b2d; }.stepper li[data-state="waiting_human"] i { background: #d48b2d; box-shadow: 0 0 0 4px #fff1d9; }.stepper li[data-state="skipped"] i { background: #a5abb5; }.stepper strong { display: block; font-size: 10px; }.stepper p { margin: 4px 0 0; color: #8b6440; font-size: 8.5px; line-height: 1.4; }.stepper>li>span { color: #7a8290; font-size: 8.5px; font-weight: 700; }
 .action-table { border: 1px solid #e7e9ed; border-radius: 8px; overflow: hidden; }.table-head,.action-row { display: grid; grid-template-columns: 1fr 1.7fr 1fr; gap: 12px; align-items: center; padding: 10px 12px; }.table-head { background: #f7f8fa; color: #949ba7; font-size: 8px; font-weight: 750; text-transform: uppercase; }.action-row { border-top: 1px solid #eceef1; }.action-row strong,.action-row span,.action-row time { font-size: 9px; }.action-row span { color: #626b7a; line-height: 1.45; }.action-row time { color: #8c94a1; }.action-row[data-success="false"] strong { color: #ad4b3e; }
 .policy-heading { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }.passage { margin-top: 8px; padding: 12px; border: 1px solid #e7e9ed; border-radius: 8px; }.passage small { color: #7063b8; font-size: 8px; }.passage p { margin: 7px 0 0; color: #50596a; font-size: 9.5px; line-height: 1.65; }

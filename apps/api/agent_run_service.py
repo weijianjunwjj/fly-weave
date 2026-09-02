@@ -520,17 +520,14 @@ def _persist_policy_retrieval(
 
 
 def _retrieval_query_summary(query: PolicyRetrievalQuery) -> str:
-    """把 retrieval query 编码为安全摘要（issue 截断，不写入完整敏感文本）。"""
-    parts = [
-        f"intent_type={query.intent_type.value}",
-        f"requested_action={query.requested_action.value}",
-    ]
+    """Build a business-readable summary without exposing internal enum fields."""
+
     issue = (query.issue_summary or "").strip()
     if issue:
-        parts.append(f"issue={issue[:_MAX_QUERY_SUMMARY_ISSUE]}")
+        return f"换货请求：{issue[:_MAX_QUERY_SUMMARY_ISSUE]}"
     if query.product_sku:
-        parts.append(f"product_sku={query.product_sku}")
-    return "; ".join(parts)
+        return f"为商品 {query.product_sku} 核验换货政策"
+    return "核验本次换货请求适用的企业政策"
 
 
 def _dump_retrieval_passages(passages) -> str | None:

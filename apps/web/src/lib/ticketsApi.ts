@@ -58,6 +58,7 @@ export interface CreateTicketInput {
 }
 
 const TICKETS_ENDPOINT = 'http://localhost:8000/tickets'
+const HIGH_RISK_DEMO_ENDPOINT = 'http://localhost:8000/demo/scenarios/high-risk-replacement'
 
 function isNullableString(value: unknown): value is string | null {
   return typeof value === 'string' || value === null
@@ -181,6 +182,23 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketDeta
   const data = await response.json()
   if (!isTicketDetailRecord(data)) {
     throw new Error('工单创建接口返回了非预期的数据结构')
+  }
+  return data
+}
+
+
+/**
+ * Append the real business inputs for the high-risk demo.
+ * Approval, AgentRun, action, and audit records are never created here.
+ */
+export async function bootstrapHighRiskDemo(): Promise<TicketDetailRecord> {
+  const response = await fetch(HIGH_RISK_DEMO_ENDPOINT, { method: 'POST' })
+  if (!response.ok) {
+    throw await apiError(response, `演示场景创建失败（${response.status}）`)
+  }
+  const data = await response.json()
+  if (!isTicketDetailRecord(data)) {
+    throw new Error('演示场景接口返回了非预期的数据结构')
   }
   return data
 }

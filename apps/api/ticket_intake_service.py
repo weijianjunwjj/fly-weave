@@ -30,6 +30,8 @@ def create_ticket(
     issue_description: str,
     order_key: str,
     order_amount: Decimal,
+    is_demo_data: bool = False,
+    demo_scenario: str | None = None,
 ) -> Ticket:
     """原子创建一张正式售后工单及其客户、订单上下文。"""
 
@@ -54,7 +56,7 @@ def create_ticket(
         name=customer_name.strip(),
         email=customer_email.strip(),
         phone=None,
-        is_demo_data=False,
+        is_demo_data=is_demo_data,
     )
     db.add(customer)
     db.flush()
@@ -67,7 +69,7 @@ def create_ticket(
         purchased_at=now,
         status=OrderStatus.DELIVERED,
         amount=order_amount,
-        is_demo_data=False,
+        is_demo_data=is_demo_data,
     )
     db.add(order)
     db.flush()
@@ -80,8 +82,8 @@ def create_ticket(
         issue_type=issue_type.strip(),
         description=issue_description.strip(),
         status=TicketStatus.OPEN,
-        demo_scenario=None,
-        is_demo_data=False,
+        demo_scenario=demo_scenario,
+        is_demo_data=is_demo_data,
         created_at=now,
         updated_at=now,
     )
