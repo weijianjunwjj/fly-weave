@@ -1151,6 +1151,107 @@ async def list_audit_events(
     ]
 
 
+class AuditCenterEventResponse(BaseModel):
+    """Audit Center 使用的一条真实审计事件聚合视图（T031）。
+
+    与按 Run 的 ``AuditEventResponse`` 不同，这里额外携带跨模块导航所需的
+    ``ticket_key`` / ``agent_run_key`` / ``approval_key`` 以及 Developer Details
+    所需的 ``metadata``（原始结构化元数据，含 reason_code / rule_code /
+    decision_reason 等）。所有字段都直接来自数据库中真实存在的 ``AuditEvent``
+    及其所属 AgentRun / Ticket，不含自增主键或 ORM 内部字段。
+    """
+
+    event_key: str
+    event_type: str
+    actor_type: str
+    occurred_at: datetime
+    outcome: str
+    success: bool
+    action: str
+    summary: str
+    affected_object_type: str | None
+    affected_object_key: str | None
+    reference_type: str | None
+    reference_key: str | None
+    # 跨模块导航：每条审计事件都归属于一个 AgentRun，进而归属于一个 Ticket
+    ticket_key: str
+    agent_run_key: str
+    # 仅审批相关事件才有可导航的 approval_key，其余为 null
+    approval_key: str | None
+    # Developer Details 用的原始元数据；解析失败或为空时为 null
+    metadata: dict | None
+
+
+def _audit_metadata(metadata_json: str | None) -> dict | None:
+    """把 AuditEvent.metadata_json 解析为结构化字典，供 Developer Details 展示。
+
+    解析失败或不是对象时返回 null，绝不让脏数据进入响应。
+    """
+    if not metadata_json:
+        return None
+    try:
+        parsed = json.loads(metadata_json)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _audit_approval_key(event: AuditEvent) -> str | None:
+    """从审计事件中取出可导航的审批业务标识。
+
+    审批相关事件在 reference_type == "approval" 时 reference_key 即 approval_key；
+    affected_object_type == "approval_request" 时 affected_object_key 同样指向审批
+    请求。其余事件返回 null。
+    """
+    if event.reference_type == "approval" and event.reference_key:
+        return event.reference_key
+    if event.affected_object_type == "approval_request" and event.affected_object_key:
+        return event.affected_object_key
+    return None
+
+
+@app.get(
+    "/audit-events",
+    response_model=list[AuditCenterEventResponse],
+)
+async def list_all_audit_events(
+    db: Session = Depends(get_db),
+) -> list[AuditCenterEventResponse]:
+    """返回全量真实审计事件，供 Audit Center 使用。
+
+    事件按 ``occurred_at`` 倒序、``id`` 倒序排列（最新在前），顺序确定、可复现。
+    不新建审计模型、不合并/去重/推断任何事件，只读取真实持久化的 ``AuditEvent``
+    并补充其 AgentRun / Ticket 上下文与原始元数据。
+    """
+    events = (
+        db.query(AuditEvent)
+        .options(joinedload(AuditEvent.agent_run).joinedload(AgentRun.ticket))
+        .order_by(AuditEvent.occurred_at.desc(), AuditEvent.id.desc())
+        .all()
+    )
+    return [
+        AuditCenterEventResponse(
+            event_key=event.business_key,
+            event_type=event.event_type.value,
+            actor_type=event.actor_type.value,
+            occurred_at=event.occurred_at,
+            outcome=event.outcome,
+            success=event.success,
+            action=event.action,
+            summary=event.summary,
+            affected_object_type=event.affected_object_type,
+            affected_object_key=event.affected_object_key,
+            reference_type=event.reference_type,
+            reference_key=event.reference_key,
+            ticket_key=event.agent_run.ticket.business_key,
+            agent_run_key=event.agent_run.business_key,
+            approval_key=_audit_approval_key(event),
+            metadata=_audit_metadata(event.metadata_json),
+        )
+        for event in events
+    ]
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(

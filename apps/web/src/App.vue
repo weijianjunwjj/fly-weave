@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import AuditView from './views/AuditView.vue'
 import AgentRunDetailView from './views/AgentRunDetailView.vue'
 import AgentRunsView from './views/AgentRunsView.vue'
 import AgentRunView from './views/AgentRunView.vue'
@@ -57,6 +58,10 @@ const isApprovalInbox = computed(() =>
   currentHash.value.startsWith('#/approvals') || (!currentHash.value && window.location.pathname === '/approvals')
 )
 
+const isAudit = computed(() =>
+  currentHash.value.startsWith('#/audit') || (!currentHash.value && window.location.pathname === '/audit')
+)
+
 const isServiceOperations = computed(() =>
   currentHash.value === '#/tickets'
   || (!currentHash.value && window.location.pathname === '/tickets')
@@ -69,9 +74,11 @@ const isOverview = computed(() =>
   && !isAgentRuns.value
   && !isApprovalInbox.value
   && !isServiceOperations.value
+  && !isAudit.value
 )
 
 const pageTitle = computed(() => {
+  if (isAudit.value) return 'Audit'
   if (isApprovalInbox.value) return 'Approval Inbox'
   if (isAgentRuns.value || agentRunDetailKey.value || agentRunTicketKey.value) return 'Agent Runs'
   if (isServiceOperations.value || ticketDetailKey.value) return 'Service Operations'
@@ -99,7 +106,7 @@ onUnmounted(() => window.removeEventListener('hashchange', handleHashChange))
         <a href="#/tickets" :class="{ active: isServiceOperations || !!ticketDetailKey }"><span>◫</span> Service Operations</a>
         <a href="#/approvals" :class="{ active: isApprovalInbox }"><span>✓</span> Approval Inbox <b v-if="isApprovalInbox">•</b></a>
         <a href="#/agent-runs" :class="{ active: isAgentRuns || !!agentRunDetailKey || !!agentRunTicketKey }"><span>✦</span> Agent Runs</a>
-        <a href="#/approvals"><span>≡</span> Audit</a>
+        <a href="#/audit" :class="{ active: isAudit }"><span>≡</span> Audit</a>
       </nav>
 
       <div class="sidebar-foot">
@@ -126,6 +133,7 @@ onUnmounted(() => window.removeEventListener('hashchange', handleHashChange))
         <TicketDetailView v-else-if="ticketDetailKey" :ticket-key="ticketDetailKey" />
         <ApprovalInboxView v-else-if="isApprovalInbox" />
         <ServiceOperationsDashboard v-else-if="isServiceOperations" />
+        <AuditView v-else-if="isAudit" />
         <OverviewView v-else />
       </main>
     </section>
