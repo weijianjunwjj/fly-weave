@@ -4,6 +4,9 @@ from decimal import Decimal
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session, joinedload
@@ -36,6 +39,20 @@ from ticket_intake_service import (
 
 
 app = FastAPI(title=settings.app_name)
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(_, exc: RequestValidationError) -> JSONResponse:
+    """将正式工单受理中的邮箱输入错误返回为明确的 HTTP 400。"""
+    if any(error["loc"] == ("body", "customer_email") for error in exc.errors()):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": jsonable_encoder(exc.errors())},
+        )
+    return JSONResponse(
+        status_code=422,
+        content={"detail": jsonable_encoder(exc.errors())},
+    )
 
 # 允许本地前端开发服务器（Vite 默认端口）跨域访问健康检查等接口。
 # POST 是 T018 启动 Agent Run 所需：整条流程由一次真实的后端请求驱动。
@@ -241,7 +258,15 @@ class CreateTicketRequest(BaseModel):
     @classmethod
     def validate_email(cls, value: str) -> str:
         normalized = value.strip()
-        if "@" not in normalized or " " in normalized:
+        if (
+            normalized.count("@") != 1
+            or " " in normalized
+            or normalized.startswith("@")
+            or normalized.endswith("@")
+        ):
+            raise ValueError("请输入有效邮箱")
+        local_part, domain = normalized.split("@")
+        if not local_part or "." not in domain or domain.startswith(".") or domain.endswith("."):
             raise ValueError("请输入有效邮箱")
         return normalized
 

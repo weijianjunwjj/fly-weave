@@ -78,3 +78,21 @@ def test_formal_ticket_intake_persists_and_enters_existing_approval_workflow(
     ]
     assert len(matching) == 1
     assert matching[0]["approval"]["status"] == "pending"
+
+
+def test_formal_ticket_intake_rejects_invalid_email_with_bad_request(
+    isolated_client: TestClient,
+):
+    response = isolated_client.post(
+        "/tickets",
+        json={
+            "customer_name": "张先生",
+            "customer_email": "not-an-email",
+            "issue_type": "商品损坏",
+            "issue_description": "客户反馈商品到货后无法正常使用，希望申请换货。",
+            "order_id": f"ORD-T027-{uuid4().hex[:12]}",
+            "order_amount": 899,
+        },
+    )
+
+    assert response.status_code == 400
